@@ -378,7 +378,8 @@ done
 
 # Listar backups disponíveis para o banco selecionado
 echo_info "Listando backups disponíveis para o banco '\$SELECTED_DATABASE'..."
-BACKUPS=($(docker exec "$CONTAINER_NAME" ls "$BACKUP_DIR" | grep "postgres_backup_.*_\$SELECTED_DATABASE\.backup"))
+# Corrigindo a declaração do array BACKUPS para lidar com espaços e caracteres especiais
+mapfile -t BACKUPS < <(docker exec "$CONTAINER_NAME" ls "$BACKUP_DIR" | grep "postgres_backup_.*_\$SELECTED_DATABASE\.backup")
 if [ ${#BACKUPS[@]} -eq 0 ]; then
     echo_error "Nenhum backup encontrado para o banco '\$SELECTED_DATABASE'."
     exit 1
