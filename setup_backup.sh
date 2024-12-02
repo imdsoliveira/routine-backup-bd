@@ -65,10 +65,6 @@ else
     echo_info "Container PostgreSQL identificado: $CONTAINER_NAME"
 fi
 
-# Atribuir label 'backup=true' ao container para identificação futura
-echo_info "Atribuindo label 'backup=true' ao container '$CONTAINER_NAME'..."
-docker container update --label-add backup=true "$CONTAINER_NAME"
-
 # Definir usuário padrão do PostgreSQL como 'postgres'
 DEFAULT_PG_USER="postgres"
 read -p "Deseja utilizar o usuário padrão do PostgreSQL ('postgres')? (yes/no): " USE_DEFAULT_USER
@@ -79,7 +75,7 @@ else
     read -p "Digite o usuário do PostgreSQL para backups: " PG_USER
 fi
 
-# Solicitar a senha do PostgreSQL (visível)
+# Solicitar a senha do PostgreSQL (não visível)
 read -sp "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
 echo
 
@@ -111,7 +107,7 @@ sudo mkdir -p "$BACKUP_DIR"
 sudo chown root:root "$BACKUP_DIR"
 sudo chmod 700 "$BACKUP_DIR"
 
-# Verificar se o diretório de backup está montado no container via label
+# Verificar se o diretório de backup está montado no container
 MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "/var/backups/postgres" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME")
 if [ -z "$MOUNTED" ]; then
     echo_error "O diretório de backup $BACKUP_DIR não está montado no container $CONTAINER_NAME."
@@ -144,7 +140,6 @@ sudo tee "$BACKUP_SCRIPT" > /dev/null <<EOF
 # Script de Backup do PostgreSQL
 
 # Configurações
-LABEL="backup=true"
 PG_USER="$PG_USER"
 BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
@@ -153,15 +148,15 @@ BACKUP_OPTION="$BACKUP_OPTION"
 
 # Funções para exibir mensagens coloridas
 function echo_info() {
-    echo -e "\e[34m[INFO]\e[0m \$1"
+    echo -e "\\e[34m[INFO]\\e[0m \$1"
 }
 
 function echo_success() {
-    echo -e "\e[32m[SUCCESS]\e[0m \$1"
+    echo -e "\\e[32m[SUCCESS]\\e[0m \$1"
 }
 
 function echo_error() {
-    echo -e "\e[31m[ERROR]\e[0m \$1"
+    echo -e "\\e[31m[ERROR]\\e[0m \$1"
 }
 
 # Função para enviar webhook
@@ -170,14 +165,14 @@ function enviar_webhook() {
     curl -s -X POST -H "Content-Type: application/json" -d "\$payload" "\$WEBHOOK_URL"
 }
 
-# Encontrar o container PostgreSQL com a label 'backup=true'
-CONTAINER_NAME=\$(docker ps --filter "label=\$LABEL" --format "{{.Names}}")
+# Encontrar o container PostgreSQL dinamicamente
+CONTAINER_NAME=\$(docker ps --filter "ancestor=postgres" --format "{{.Names}}" | head -n 1)
 if [ -z "\$CONTAINER_NAME" ]; then
-    echo_error "Container PostgreSQL com label '\$LABEL' não encontrado."
+    echo_error "Nenhum container PostgreSQL encontrado com a imagem 'postgres'."
     exit 1
 fi
 
-# Listar bancos de dados
+# Listar bancos de dados disponíveis
 echo_info "Listando bancos de dados disponíveis no container '\$CONTAINER_NAME'..."
 DATABASES=\$(docker exec -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate = false;")
 if [ -z "\$DATABASES" ]; then
@@ -218,7 +213,8 @@ for BANCO in \$SELECTED_DATABASES; do
     echo_info "Iniciando backup do banco de dados '\$BANCO'..."
     
     # Nome do Arquivo de Backup
-    ARQUIVO_BACKUP="postgres_backup_\$(date +%Y%m%d%H%M%S)_\$BANCO.backup"
+    TIMESTAMP=\$(date +%Y%m%d%H%M%S)
+    ARQUIVO_BACKUP="postgres_backup_\$TIMESTAMP_\$BANCO.backup"
     
     # Caminho Completo do Backup
     CAMINHO_BACKUP="\$BACKUP_DIR/\$ARQUIVO_BACKUP"
@@ -233,7 +229,7 @@ for BANCO in \$SELECTED_DATABASES; do
             echo_info "Realizando backup das tabelas especificadas no banco de dados '\$BANCO'..."
             TABLES_STRING=\$(printf ",\"%s\"" "\${TABLES[@]}")
             TABLES_STRING=\${TABLES_STRING:1}  # Remover a primeira vírgula
-            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -h localhost -p 5432 -d "\$BANCO" --format=custom --data-only --inserts --column-inserts --table "\$TABLES_STRING" -f "\$CAMINHO_BACKUP"
+            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -d "\$BANCO" --format=custom --data-only --inserts --column-inserts --table "\$TABLES_STRING" -f "\$CAMINHO_BACKUP"
         else
             # Backup completo se não desejar tabelas específicas
             echo_info "Realizando backup completo do banco de dados '\$BANCO'..."
@@ -313,22 +309,21 @@ sudo tee "$RESTORE_SCRIPT" > /dev/null <<EOF
 # Script de Restauração do PostgreSQL
 
 # Configurações
-LABEL="backup=true"
 PG_USER="$PG_USER"
 BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
 
 # Funções para exibir mensagens coloridas
 function echo_info() {
-    echo -e "\e[34m[INFO]\e[0m \$1"
+    echo -e "\\e[34m[INFO]\\e[0m \$1"
 }
 
 function echo_success() {
-    echo -e "\e[32m[SUCCESS]\e[0m \$1"
+    echo -e "\\e[32m[SUCCESS]\\e[0m \$1"
 }
 
 function echo_error() {
-    echo -e "\e[31m[ERROR]\e[0m \$1"
+    echo -e "\\e[31m[ERROR]\\e[0m \$1"
 }
 
 # Função para enviar webhook
@@ -337,14 +332,14 @@ function enviar_webhook() {
     curl -s -X POST -H "Content-Type: application/json" -d "\$payload" "\$WEBHOOK_URL"
 }
 
-# Encontrar o container PostgreSQL com a label 'backup=true'
-CONTAINER_NAME=\$(docker ps --filter "label=\$LABEL" --format "{{.Names}}")
+# Encontrar o container PostgreSQL dinamicamente
+CONTAINER_NAME=\$(docker ps --filter "ancestor=postgres" --format "{{.Names}}" | head -n 1)
 if [ -z "\$CONTAINER_NAME" ]; then
-    echo_error "Container PostgreSQL com label '\$LABEL' não encontrado."
+    echo_error "Nenhum container PostgreSQL encontrado com a imagem 'postgres'."
     exit 1
 fi
 
-# Listar bancos de dados
+# Listar bancos de dados disponíveis
 echo_info "Listando bancos de dados disponíveis no container '\$CONTAINER_NAME'..."
 DATABASES=\$(docker exec -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate = false;")
 if [ -z "\$DATABASES" ]; then
