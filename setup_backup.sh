@@ -146,6 +146,7 @@ BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
 RETENTION_DAYS="$RETENTION_DAYS"
 BACKUP_OPTION="$BACKUP_OPTION"
+CONTAINER_NAME="$CONTAINER_NAME"
 
 # Funções para exibir mensagens coloridas
 function echo_info() {
@@ -165,13 +166,6 @@ function enviar_webhook() {
     local payload="\$1"
     curl -s -X POST -H "Content-Type: application/json" -d "\$payload" "\$WEBHOOK_URL"
 }
-
-# Encontrar o container PostgreSQL dinamicamente
-CONTAINER_NAME=\$(docker ps --filter "ancestor=postgres" --format "{{.Names}}" | head -n 1)
-if [ -z "\$CONTAINER_NAME" ]; then
-    echo_error "Nenhum container PostgreSQL encontrado com a imagem 'postgres'."
-    exit 1
-fi
 
 # Listar bancos de dados disponíveis
 echo_info "Listando bancos de dados disponíveis no container '\$CONTAINER_NAME'..."
@@ -214,22 +208,22 @@ fi
 # Iniciar Backup
 for BANCO in \$SELECTED_DATABASES; do
     echo_info "Iniciando backup do banco de dados '\$BANCO'..."
-    
+
     # Nome do Arquivo de Backup
     TIMESTAMP=\$(date +%Y%m%d%H%M%S)
     ARQUIVO_BACKUP="postgres_backup_\$TIMESTAMP_\$BANCO.backup"
-    
+
     # Caminho Completo do Backup
     CAMINHO_BACKUP="\$BACKUP_DIR/\$ARQUIVO_BACKUP"
-    
+
     case "\$BACKUP_TYPE" in
         "completo_com_inserts")
-            # Backup completo com inserts
+            # Backup completo com inserts (Formato Padrão)
             echo_info "Realizando backup completo do banco de dados '\$BANCO' com inserts..."
-            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v -f "\$CAMINHO_BACKUP" "\$BANCO"
+            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F p --inserts -v -f "\$CAMINHO_BACKUP" "\$BANCO"
             ;;
         "apenas_tabelas")
-            # Backup apenas das tabelas
+            # Backup apenas das tabelas (Schema Only)
             echo_info "Realizando backup apenas das tabelas do banco de dados '\$BANCO'..."
             docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v --schema-only -f "\$CAMINHO_BACKUP" "\$BANCO"
             ;;
@@ -243,16 +237,16 @@ for BANCO in \$SELECTED_DATABASES; do
             fi
             TABLES_STRING=\$(printf ",\"%s\"" "\${TABLES[@]}")
             TABLES_STRING=\${TABLES_STRING:1}  # Remover a primeira vírgula
-            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -d "\$BANCO" --format=custom --data-only --inserts --column-inserts --table "\$TABLES_STRING" -f "\$CAMINHO_BACKUP"
+            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -d "\$BANCO" --format=plain --data-only --inserts --column-inserts --table "\$TABLES_STRING" -f "\$CAMINHO_BACKUP"
             ;;
         *)
             echo_error "Tipo de backup desconhecido. Pulando este banco de dados."
             continue
             ;;
     esac
-    
+
     STATUS_BACKUP=\$?
-    
+
     # Verifica se o Backup foi Bem-Sucedido
     if [ \$STATUS_BACKUP -eq 0 ]; then
         STATUS="OK"
@@ -265,13 +259,13 @@ for BANCO in \$SELECTED_DATABASES; do
         BACKUP_SIZE="0B"
         echo_error "Backup falhou para o banco '\$BANCO': \$ARQUIVO_BACKUP"
     fi
-    
+
     # Gerenciamento de Retenção
     echo_info "Verificando backups antigos do banco '\$BANCO' que excedem \$RETENTION_DAYS dias..."
     BACKUPS_ANTIGOS=\$(find "\$BACKUP_DIR" -type f -name "postgres_backup_*_\$BANCO.backup" -mtime +\$RETENTION_DAYS)
-    
+
     DELETED_BACKUPS_JSON="[]"
-    
+
     if [ -n "\$BACKUPS_ANTIGOS" ]; then
         DELETED_BACKUPS=()
         for arquivo in \$BACKUPS_ANTIGOS; do
@@ -285,7 +279,7 @@ for BANCO in \$SELECTED_DATABASES; do
         # Converte o Array para JSON
         DELETED_BACKUPS_JSON=\$(IFS=, ; echo "[\${DELETED_BACKUPS[*]}]")
     fi
-    
+
     # Preparar o Payload JSON
     PAYLOAD=\$(cat <<EOF_JSON
 {
@@ -301,10 +295,10 @@ for BANCO in \$SELECTED_DATABASES; do
 }
 EOF_JSON
 )
-    
+
     # Enviar o Webhook
     enviar_webhook "\$PAYLOAD"
-    
+
     # Log (Opcional)
     echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Backup \$STATUS: \$ARQUIVO_BACKUP, Size: \$BACKUP_SIZE" >> /var/log/backup_postgres.log
     echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Backups antigos removidos: \$DELETED_BACKUPS_JSON" >> /var/log/backup_postgres.log
@@ -326,6 +320,7 @@ sudo tee "$RESTORE_SCRIPT" > /dev/null <<EOF
 PG_USER="$PG_USER"
 BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
+CONTAINER_NAME="$CONTAINER_NAME"
 
 # Funções para exibir mensagens coloridas
 function echo_info() {
@@ -345,13 +340,6 @@ function enviar_webhook() {
     local payload="\$1"
     curl -s -X POST -H "Content-Type: application/json" -d "\$payload" "\$WEBHOOK_URL"
 }
-
-# Encontrar o container PostgreSQL dinamicamente
-CONTAINER_NAME=\$(docker ps --filter "ancestor=postgres" --format "{{.Names}}" | head -n 1)
-if [ -z "\$CONTAINER_NAME" ]; then
-    echo_error "Nenhum container PostgreSQL encontrado com a imagem 'postgres'."
-    exit 1
-fi
 
 # Listar bancos de dados disponíveis
 echo_info "Listando bancos de dados disponíveis no container '\$CONTAINER_NAME'..."
@@ -410,12 +398,27 @@ read -p "Tem certeza que deseja restaurar este backup? Isso sobrescreverá o ban
 
 if [[ "\$CONFIRM" != "yes" && "\$CONFIRM" != "Yes" && "\$CONFIRM" != "YES" ]]; then
     echo_info "Restauração cancelada pelo usuário."
-    exit 1
+    exit 0
 fi
 
 # Processo de Restauração com Feedback ao Usuário
 echo_info "Iniciando restauração do backup '\$SELECTED_BACKUP' no banco '\$SELECTED_DATABASE'..."
-docker exec -t "\$CONTAINER_NAME" pg_restore -U "\$PG_USER" -d "\$SELECTED_DATABASE" -c "\$BACKUP_DIR/\$SELECTED_BACKUP"
+
+# Determinar o tipo de backup com base no nome do arquivo
+if [[ "\$SELECTED_BACKUP" == *com_inserts.backup ]]; then
+    # Backup com inserts (Formato Padrão)
+    docker exec -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d "\$SELECTED_DATABASE" -f "\$BACKUP_DIR/\$SELECTED_BACKUP"
+elif [[ "\$SELECTED_BACKUP" == *apenas_tabelas.backup ]]; then
+    # Backup apenas das tabelas (Schema Only, formato Custom)
+    docker exec -t "\$CONTAINER_NAME" pg_restore -U "\$PG_USER" -d "\$SELECTED_DATABASE" -c "\$BACKUP_DIR/\$SELECTED_BACKUP"
+elif [[ "\$SELECTED_BACKUP" == *tabelas_especificas_com_inserts.backup ]]; then
+    # Backup de tabelas específicas com inserts (Formato Padrão)
+    docker exec -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d "\$SELECTED_DATABASE" -f "\$BACKUP_DIR/\$SELECTED_BACKUP"
+else
+    echo_error "Tipo de backup desconhecido. Não foi possível determinar o método de restauração."
+    exit 1
+fi
+
 STATUS_RESTORE=\$?
 
 # Verifica se a Restauração foi Bem-Sucedida
