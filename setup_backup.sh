@@ -283,19 +283,15 @@ echo_success "Cron job agendado com sucesso."
 
 echo_success "Configuração de backup concluída com sucesso!"
 
-# Perguntar se deseja executar backup/restauração
-read -p "Deseja executar o backup ou restauração agora? (backup/restore/no): " RUN_ACTION
-case "$RUN_ACTION" in
-    backup|Backup|BACKUP)
+# Perguntar se deseja executar backup
+read -p "Deseja executar o backup agora? (yes/no): " RUN_BACKUP
+case "$RUN_BACKUP" in
+    yes|Yes|YES)
         echo_info "Executando backup..."
         $BACKUP_SCRIPT
         ;;
-    restore|Restore|RESTORE)
-        echo_info "Executando restauração..."
-        $RESTORE_SCRIPT
-        ;;
     *)
-        echo_info "Não executando backup ou restauração."
+        echo_info "Não executando backup."
         ;;
 esac
 
