@@ -23,6 +23,11 @@ function command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Função para validar URL
+function valid_url() {
+    [[ "$1" =~ ^https?://.+ ]]
+}
+
 # Verificar se Docker está instalado
 if ! command_exists docker; then
     echo_error "Docker não está instalado. Por favor, instale o Docker antes de executar este script."
@@ -78,6 +83,16 @@ echo
 read -p "Digite o período de retenção dos backups em dias [30]: " RETENTION_DAYS
 RETENTION_DAYS=${RETENTION_DAYS:-30}
 
+# Solicitar o Webhook URL e validar
+while true; do
+    read -p "Digite a URL do Webhook para notificações: " WEBHOOK_URL
+    if valid_url "$WEBHOOK_URL"; then
+        break
+    else
+        echo_error "URL inválida. Certifique-se de que está no formato http:// ou https://"
+    fi
+done
+
 # Configurar diretório de backup no host
 BACKUP_DIR="/var/backups/postgres"
 echo_info "Criando diretório de backup em $BACKUP_DIR..."
@@ -120,7 +135,7 @@ cat <<EOF > "$BACKUP_SCRIPT"
 # Configurações
 CONTAINER_NAME="$CONTAINER_NAME"
 PG_USER="$PG_USER"
-BACKUP_DIR="/var/backups/postgres"
+BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
 RETENTION_DAYS="$RETENTION_DAYS"
 
@@ -201,7 +216,7 @@ cat <<EOF > "$RESTORE_SCRIPT"
 # Configurações
 CONTAINER_NAME="$CONTAINER_NAME"
 PG_USER="$PG_USER"
-BACKUP_DIR="/var/backups/postgres"
+BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
 
 # Funções para exibir mensagens coloridas
