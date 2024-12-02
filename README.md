@@ -1,347 +1,441 @@
 # Routine Backup BD
-Rotina de backup de banco de dados (postgres slq) via servidor com opção de restauração
 
-# Necessário Verificar Antes
+**Rotina de backup de banco de dados PostgreSQL com opção de restauração**
 
-## Verificar pg_dump
-pg_dump --version
+---
 
-## Verificar cron
-crontab -l
-systemctl status cron
+## Índice
 
-## Verificar curl
-curl --version
+1. [Visão Geral](#visão-geral)
+2. [Requisitos](#requisitos)
+3. [Configuração Inicial](#configuração-inicial)
+    - [1. Preparação do Ambiente](#1-preparação-do-ambiente)
+    - [2. Montagem do Diretório de Backups no Container](#2-montagem-do-diretório-de-backups-no-container)
+4. [Instalação e Configuração](#instalação-e-configuração)
+    - [1. Executando o Script de Configuração](#1-executando-o-script-de-configuração)
+    - [2. Configurando Autenticação Automática](#2-configurando-autenticação-automática)
+    - [3. Configurando Notificações via Webhook](#3-configurando-notificações-via-webhook)
+5. [Operações Manuais](#operações-manuais)
+    - [1. Executando o Backup Manualmente](#1-executando-o-backup-manualmente)
+    - [2. Restaurando um Backup Manualmente](#2-restaurando-um-backup-manualmente)
+    - [3. Removendo Arquivos de Backup Manualmente](#3-removendo-arquivos-de-backup-manualmente)
+6. [Automatização com Cron](#automatização-com-cron)
+7. [Monitoramento e Logs](#monitoramento-e-logs)
+8. [Boas Práticas e Considerações de Segurança](#boas-práticas-e-considerações-de-segurança)
+9. [FAQ](#faq)
+10. [Suporte](#suporte)
 
-# Setup
-## Configurando o Diretório de Backups Usando o Usuário root
+---
 
-```shell
-# Criar o Diretório de Backups
-sudo mkdir -p /var/backups/postgres
-# Alterar a Propriedade do Diretório para root:root
-sudo chown root:root /var/backups/postgres 
+## Visão Geral
+
+O **Routine Backup BD** é uma solução automatizada para realizar backups periódicos de bancos de dados PostgreSQL em ambientes Dockerizados. Além da criação automática de backups, o sistema oferece opções de restauração e notificações via webhook para monitoramento em tempo real.
+
+---
+
+## Requisitos
+
+Antes de iniciar a configuração, certifique-se de que os seguintes componentes estejam instalados e configurados no seu servidor:
+
+- **Docker:** Plataforma para desenvolvimento, envio e execução de aplicativos em containers.
+- **PostgreSQL:** Sistema de gerenciamento de banco de dados relacional.
+- **pg_dump:** Utilitário para exportar bancos de dados PostgreSQL.
+- **Cron:** Agendador de tarefas para executar scripts automaticamente.
+- **cURL:** Ferramenta para transferir dados com URLs, utilizada para enviar notificações via webhook.
+
+### Verificações Necessárias
+
+1. **Verificar pg_dump:**
+
+    ```bash
+    pg_dump --version
+    ```
+
+2. **Verificar Cron:**
+
+    ```bash
+    crontab -l
+    systemctl status cron
+    ```
+
+3. **Verificar cURL:**
+
+    ```bash
+    curl --version
+    ```
+
+---
+
+## Configuração Inicial
+
+### 1. Preparação do Ambiente
+
+Antes de executar o script de configuração, realize os seguintes passos:
+
+- **Criar o Diretório de Backups:**
+
+    Crie um diretório dedicado para armazenar os backups do PostgreSQL.
+
+    ```bash
+    sudo mkdir -p /var/backups/postgres
+    sudo chown root:root /var/backups/postgres 
+    sudo chmod 700 /var/backups/postgres
+    ```
+
+### 2. Montagem do Diretório de Backups no Container
+
+Para garantir que os backups sejam armazenados corretamente no host, o diretório de backups deve ser montado no container PostgreSQL.
+
+- **Adicionar Volume no Docker Compose:**
+
+    Edite o arquivo `docker-compose.yml` do seu container PostgreSQL para incluir o volume de backup.
+
+    ```yaml
+    volumes:
+      - /var/backups/postgres:/var/backups/postgres
+    ```
+
+- **Reiniciar o Container:**
+
+    Após adicionar o volume, reinicie o container para aplicar as mudanças.
+
+    ```bash
+    docker-compose down
+    docker-compose up -d
+    ```
+
+- **Verificar a Montagem do Volume:**
+
+    ```bash
+    docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "/var/backups/postgres" }}{{ .Source }}{{ end }}{{ end }}' nome_do_container
+    ```
+
+---
+
+## Instalação e Configuração
+
+### 1. Executando o Script de Configuração
+
+Execute o script de configuração para automatizar a criação dos scripts de backup e restauração, além de configurar o agendamento com o cron.
+
+```bash
+bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
 ```
 
-## Configurando a Autenticação Automática com .pgpass
+Durante a execução, você será solicitado a fornecer as seguintes informações:
 
-Criar o Arquivo .pgpass em:
+- **Nome do Container PostgreSQL:** O script tenta identificar automaticamente, mas pode ser solicitado que você insira manualmente caso haja múltiplos containers ou nenhum identificado.
+- **Usuário do PostgreSQL:** Por padrão, é `postgres`. Você pode optar por usar o usuário padrão ou especificar outro.
+- **Senha do Usuário PostgreSQL:** Insira a senha do usuário selecionado.
+- **Período de Retenção dos Backups:** Número de dias que os backups serão mantidos (padrão: 30 dias).
+- **URL do Webhook para Notificações:** Insira a URL completa do seu serviço de webhook para receber notificações (exemplo: Discord, Slack).
 
-```shell
-nano /root/.pgpass
+### 2. Configurando Autenticação Automática
+
+O script de configuração cria e configura o arquivo `.pgpass` para autenticação automática com o PostgreSQL, evitando a necessidade de inserir a senha manualmente durante os backups.
+
+- **Localização do Arquivo `.pgpass`:**
+
+    ```bash
+    /root/.pgpass
+    ```
+
+- **Permissões do Arquivo:**
+
+    ```bash
+    chmod 600 /root/.pgpass
+    ```
+
+### 3. Configurando Notificações via Webhook
+
+Após configurar o backup, o sistema enviará notificações via webhook informando sobre o status dos backups.
+
+- **Verifique a Recepção das Notificações:**
+
+    Certifique-se de que o serviço de webhook está recebendo as notificações corretamente. Teste manualmente a URL do webhook, se necessário.
+
+    ```bash
+    curl -X POST -H "Content-Type: application/json" -d '{"test": "backup"}' "https://seu-webhook-url.com/webhook"
+    ```
+
+---
+
+## Operações Manuais
+
+### 1. Executando o Backup Manualmente
+
+Para executar o backup manualmente, utilize o seguinte comando:
+
+```bash
+sudo /usr/local/bin/backup_postgres.sh
 ```
 
-No arquivo, adicione:
+**Passos:**
 
-```shell
-touch /root/.pgpass
-chmod 600 /root/.pgpass
-# Altere os dados, ip, usuario e senha
-localhost:5432:postgres:seu_usuario:sua_senha
+1. **Executar o Script:**
+
+    ```bash
+    sudo /usr/local/bin/backup_postgres.sh
+    ```
+
+2. **Verificar a Criação do Backup:**
+
+    ```bash
+    ls -lh /var/backups/postgres/
+    ```
+
+    Você deve ver um novo arquivo de backup com o formato `postgres_backup_YYYYMMDDHHMMSS.backup`.
+
+3. **Verificar os Logs de Backup:**
+
+    ```bash
+    cat /var/log/backup_postgres.log
+    ```
+
+    **Exemplo de Entrada de Log:**
+
+    ```
+    [2024-12-03 00:00:01] Backup OK: postgres_backup_20241203000000.backup, Size: 15M
+    [2024-12-03 00:00:01] Backups antigos removidos: []
+    ```
+
+### 2. Restaurando um Backup Manualmente
+
+Para restaurar um backup, utilize o script de restauração fornecido.
+
+```bash
+sudo /usr/local/bin/restore_postgres.sh
 ```
 
-## Criando o Script de Backup
+**Passos:**
 
-Criar o Script:
+1. **Executar o Script de Restauração:**
 
-```shell
-nano /usr/local/bin/backup_postgres.sh
+    ```bash
+    sudo /usr/local/bin/restore_postgres.sh
+    ```
+
+2. **Selecionar o Backup para Restaurar:**
+
+    O script listará todos os backups disponíveis. Digite o número correspondente ao backup que deseja restaurar.
+
+3. **Confirmar a Restauração:**
+
+    Confirme que deseja restaurar o backup selecionado. **Atenção:** Isso sobrescreverá o banco de dados atual.
+
+4. **Verificar os Logs de Restauração:**
+
+    ```bash
+    cat /var/log/backup_postgres.log
+    ```
+
+    **Exemplo de Entrada de Log:**
+
+    ```
+    [2024-12-03 00:10:00] Restauração OK: postgres_backup_20241203000000.backup
+    ```
+
+### 3. Removendo Arquivos de Backup Manualmente
+
+Para remover backups manualmente da pasta de backups, siga os passos abaixo.
+
+1. **Listar os Backups Existentes:**
+
+    ```bash
+    ls -lh /var/backups/postgres/
+    ```
+
+2. **Remover Backups Específicos:**
+
+    Para remover todos os backups com a extensão `.backup`:
+
+    ```bash
+    sudo rm /var/backups/postgres/*.backup
+    ```
+
+    **Remover Apenas Backups com Tamanho Zero:**
+
+    ```bash
+    sudo find /var/backups/postgres/ -type f -size 0 -name "*.backup" -exec rm {} \;
+    ```
+
+3. **Confirmar a Remoção dos Backups:**
+
+    ```bash
+    ls -lh /var/backups/postgres/
+    ```
+
+    O diretório deve estar limpo ou conter apenas os backups que você deseja manter.
+
+---
+
+## Automatização com Cron
+
+O script de configuração já adiciona uma entrada no `crontab` para executar o backup automaticamente todos os dias às 00:00.
+
+### Verificar o Cron Job
+
+1. **Listar Cron Jobs:**
+
+    ```bash
+    crontab -l
+    ```
+
+    **Saída Esperada:**
+
+    ```
+    0 0 * * * /usr/local/bin/backup_postgres.sh >> /var/log/backup_postgres_cron.log 2>&1
+    ```
+
+2. **Verificar o Serviço Cron:**
+
+    Certifique-se de que o serviço cron está ativo e funcionando.
+
+    ```bash
+    systemctl status cron
+    ```
+
+    **Saída Esperada:**
+
+    ```
+    ● cron.service - Regular background program processing daemon
+       Loaded: loaded (/lib/systemd/system/cron.service; enabled; vendor preset: enabled)
+       Active: active (running) since Thu 2024-12-02 12:00:00 UTC; 2h ago
+    ```
+
+3. **Verificar os Logs do Cron Job Após a Execução Agendada:**
+
+    Após o próximo horário agendado, verifique os logs para confirmar a execução do backup automático.
+
+    ```bash
+    cat /var/log/backup_postgres_cron.log
+    ```
+
+    **Exemplo de Entrada de Log:**
+
+    ```
+    [2024-12-03 00:00:01] Backup OK: postgres_backup_20241203000000.backup, Size: 15M
+    [2024-12-03 00:00:01] Backups antigos removidos: []
+    ```
+
+---
+
+## Monitoramento e Logs
+
+### Logs de Backup
+
+Os logs de backup são armazenados em:
+
+```bash
+/var/log/backup_postgres.log
 ```
 
-Adicionar o Conteúdo ao Script:
+**Conteúdo do Log:**
 
-```shell
-#!/bin/bash
-
-########################################
-# Configurações
-########################################
-
-# Data e Hora Atual
-DATA=$(date +%Y-%m-%d)
-HORA=$(date +%H:%M:%S)
-
-# Diretório de Backup
-DIRETORIO_BACKUP="/var/backups/postgres"
-
-# Nome do Banco de Dados
-BANCO="postgres"  # Substitua se necessário
-
-# Usuário do PostgreSQL
-USUARIO="postgres"  # Substitua pelo usuário do PostgreSQL
-
-# Host e Porta do PostgreSQL
-HOST="154.38.173.92"
-PORTA="5432"
-
-# Período de Retenção em Dias
-RETENCAO_DIAS=30  # Variável configurável
-
-# Webhook URL
-WEBHOOK_URL="https://whk.supercaso.com.br/webhook/routine-backup-bd"
-
-########################################
-# Funções
-########################################
-
-# Função para enviar webhook
-enviar_webhook() {
-  local payload="$1"
-  curl -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
-}
-
-########################################
-# Processo de Backup
-########################################
-
-# Nome do Arquivo de Backup
-ARQUIVO_BACKUP="${BANCO}_backup_$(date +%Y%m%d%H%M%S).backup"
-
-# Caminho Completo do Backup
-CAMINHO_BACKUP="${DIRETORIO_BACKUP}/${ARQUIVO_BACKUP}"
-
-# Realiza o Backup
-pg_dump -U "$USUARIO" -h "$HOST" -p "$PORTA" -F c -b -v -f "$CAMINHO_BACKUP" "$BANCO"
-STATUS_BACKUP=$?
-
-# Verifica se o Backup foi Bem-Sucedido
-if [ $STATUS_BACKUP -eq 0 ]; then
-  STATUS="OK"
-  NOTES="Backup executado conforme cron job configurado. Nenhum erro reportado durante o processo."
-  BACKUP_SIZE=$(du -h "$CAMINHO_BACKUP" | cut -f1)
-else
-  STATUS="ERRO"
-  NOTES="Falha ao executar o backup. Verifique os logs para mais detalhes."
-  BACKUP_SIZE="0B"
-fi
-
-########################################
-# Gerenciamento de Retenção
-########################################
-
-# Lista de Backups Antigos que Excedem o Período de Retenção
-BACKUPS_ANTIGOS=$(find "$DIRETORIO_BACKUP" -type f -name "${BANCO}_backup_*.backup" -mtime +$RETENCAO_DIAS)
-
-DELETED_BACKUPS_JSON="[]"
-
-if [ -n "$BACKUPS_ANTIGOS" ]; then
-  DELETED_BACKUPS=()
-  for arquivo in $BACKUPS_ANTIGOS; do
-    nome_backup=$(basename "$arquivo")
-    # Remove o Arquivo
-    rm -f "$arquivo"
-    # Adiciona Detalhes ao JSON
-    DELETED_BACKUPS+=("{\"backup_name\": \"$nome_backup\", \"deletion_reason\": \"Prazo de retenção expirado\"}")
-  done
-  # Converte o Array para JSON
-  DELETED_BACKUPS_JSON=$(IFS=, ; echo "[${DELETED_BACKUPS[*]}]")
-fi
-
-########################################
-# Enviar Notificação via Webhook
-########################################
-
-# Preparar o Payload JSON
-PAYLOAD=$(cat <<EOF
-{
-  "action": "Backup realizado com sucesso",
-  "date": "$(date '+%d/%m/%Y %H:%M:%S')",
-  "database_name": "$BANCO",
-  "backup_file": "$(basename "$ARQUIVO_BACKUP")",
-  "backup_size": "$BACKUP_SIZE",
-  "retention_days": $RETENCAO_DIAS,
-  "deleted_backup": $DELETED_BACKUPS_JSON,
-  "status": "$STATUS",
-  "notes": "$NOTES"
-}
-EOF
-)
-
-# Enviar o Webhook
-enviar_webhook "$PAYLOAD"
-
-# Log (Opcional)
-echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Backup $STATUS: $(basename "$ARQUIVO_BACKUP"), Size: $BACKUP_SIZE" >> /var/log/backup_postgres.log
-echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Backups antigos removidos: $DELETED_BACKUPS_JSON" >> /var/log/backup_postgres.log
+```
+[2024-12-03 00:00:01] Backup OK: postgres_backup_20241203000000.backup, Size: 15M
+[2024-12-03 00:00:01] Backups antigos removidos: []
 ```
 
-Explicação do Script:
+### Logs do Cron Job
 
-- Variáveis de Configuração: Define os parâmetros necessários, incluindo diretório de backup, nome do banco de dados, usuário, host, porta, período de retenção e URL do webhook.
-- Função enviar_webhook: Envia uma requisição POST com o payload JSON para a URL do webhook especificada.
-- Processo de Backup: Executa o pg_dump para criar o backup. Verifica se o comando foi bem-sucedido e captura o tamanho do backup.
-- Gerenciamento de Retenção: Encontra e remove backups que excedem o período de retenção definido.
-- Notificação via Webhook: Prepara e envia um payload JSON detalhando o backup realizado e quaisquer backups deletados.
-- Logs: Adiciona entradas nos logs para monitoramento.
+Os logs das execuções automáticas do cron job são armazenados em:
 
-Tornar o Script Executável:
-
-```shell
-chmod +x /usr/local/bin/backup_postgres.sh
+```bash
+/var/log/backup_postgres_cron.log
 ```
 
-## Configurando o Cron Job para Executar o Backup Diariamente às 00:00
+**Conteúdo do Log:**
 
-Editar o Crontab do Usuário root:
-
-```shell
-crontab -e
 ```
-Adicionar a Linha do Cron:
-
-```shell
-0 0 * * * /usr/local/bin/backup_postgres.sh >> /var/log/backup_postgres_cron.log 2>&1
+[2024-12-03 00:00:01] Backup OK: postgres_backup_20241203000000.backup, Size: 15M
+[2024-12-03 00:00:01] Backups antigos removidos: []
 ```
 
-## Testando o Script de Backup Manualmente
+### Notificações via Webhook
 
-Executar o Script de Backup:
+As notificações de backup e restauração são enviadas para a URL do webhook configurada. Verifique no seu serviço de webhook (como Discord ou Slack) se as mensagens estão sendo recebidas conforme esperado.
 
-```shell
-/usr/local/bin/backup_postgres.sh
+---
+
+## Boas Práticas e Considerações de Segurança
+
+### Proteção das Credenciais
+
+- **Arquivo `.pgpass`:** Certifique-se de que este arquivo está protegido com permissões restritivas (`600`).
+
+    ```bash
+    ls -l /root/.pgpass
+    ```
+
+    **Saída Esperada:**
+
+    ```
+    -rw------- 1 root root 42 Dez  3 00:00 /root/.pgpass
+    ```
+
+- **Scripts de Backup e Restauração:** Mantenha os scripts em locais seguros e assegure que apenas usuários autorizados tenham acesso a eles.
+
+### Monitoramento Contínuo
+
+- **Logs de Backup:** Monitore regularmente os logs em `/var/log/backup_postgres.log` e `/var/log/backup_postgres_cron.log` para identificar possíveis falhas ou problemas.
+- **Notificações:** Utilize as notificações via webhook para receber alertas em tempo real sobre o status dos backups.
+
+### Testes Periódicos de Restauração
+
+Realize testes regulares de restauração para garantir que os backups estão íntegros e funcionais.
+
+```bash
+sudo /usr/local/bin/restore_postgres.sh
 ```
 
-Verificar a Criação do Arquivo de Backup:
+**Observação:** Execute esses testes em um ambiente de staging ou desenvolvimento para evitar impactos na produção.
 
-```shell
-ls -lh /var/backups/postgres/
-```
-Você deve ver um arquivo de backup recente, por exemplo:
+### Atualizações e Manutenção dos Scripts
 
-```shell
--rw------- 1 root root 15M Dez  2 00:00 postgres_backup_20241202000000.backup
-```
+- **Atualizações do PostgreSQL/Docker:** Mantenha o PostgreSQL e o Docker atualizados para garantir a segurança e o bom funcionamento dos backups.
+- **Revisão dos Scripts:** Periodicamente, revise e atualize os scripts para incorporar melhorias e correções de segurança.
 
-Verificar os Logs:
+### Armazenamento Remoto e Redundância
 
-```shell
-cat /var/log/backup_postgres_cron.log
-```
+- **Backups Remotos:** Considere armazenar backups em locais remotos ou serviços de armazenamento na nuvem para garantir maior segurança e redundância.
+- **Redundância:** Mantenha múltiplas cópias dos backups em diferentes locais físicos ou lógicos.
 
-Exemplo de Entrada de Log:
+---
 
-```shell
-[2024-12-02 00:00:01] Backup OK: postgres_backup_20241202000000.backup, Size: 15M
-[2024-12-02 00:00:01] Backups antigos removidos: []
-```
+## FAQ
 
-# Criando o Script de Restauração
+**1. O que fazer se os backups estiverem sendo criados com tamanho zero ou muito pequeno?**
 
-Criar o Script restore_postgres.sh: 
+- **Verifique a Configuração do Webhook:** Certifique-se de que a URL do webhook está correta no script de backup.
+- **Permissões:** Confirme se o diretório de backups está corretamente montado no container PostgreSQL e que o usuário `postgres` tem permissões para escrever nesse diretório.
+- **Teste Manual do Backup:** Execute o script de backup manualmente e verifique os logs para identificar possíveis erros.
 
-```shell
-nano /usr/local/bin/restore_postgres.sh
-```
+**2. Como adicionar mais usuários para realizar backups?**
 
-Adicionar o Conteúdo ao Script:
+- **Editar o Arquivo `.pgpass`:** Adicione entradas adicionais para cada usuário no formato:
 
-```shell
-#!/bin/bash
+    ```
+    localhost:5432:postgres:usuario:sua_senha
+    ```
 
-########################################
-# Configurações
-########################################
+- **Modificar o Script de Backup:** Atualize o script para incluir os novos usuários conforme necessário.
 
-# Diretório de Backup
-DIRETORIO_BACKUP="/var/backups/postgres"
+**3. Como restaurar um backup em um ambiente diferente?**
 
-# Nome do Banco de Dados
-BANCO="postgres"  # Substitua se necessário
+- **Transferir o Arquivo de Backup:** Copie o arquivo de backup para o novo ambiente.
+- **Executar o Script de Restauração:** Utilize o script de restauração manualmente, especificando o caminho correto para o arquivo de backup.
 
-# Usuário do PostgreSQL
-USUARIO="seu_usuario"  # Substitua pelo usuário do PostgreSQL
+---
 
-# Host e Porta do PostgreSQL
-HOST="localhost"
-PORTA="5432"
+## Suporte
 
-########################################
-# Funções
-########################################
+Para suporte adicional ou dúvidas específicas sobre a configuração e uso da rotina de backup, entre em contato:
 
-# Função para listar backups
-listar_backups() {
-  echo "Listagem de Backups Disponíveis para o Banco '$BANCO':"
-  echo "-----------------------------------------------------"
-  mapfile -t BACKUP_LIST < <(ls -1t "$DIRETORIO_BACKUP/${BANCO}_backup_"*.backup 2>/dev/null)
-  
-  if [ ${#BACKUP_LIST[@]} -eq 0 ]; then
-    echo "Nenhum backup encontrado no diretório $DIRETORIO_BACKUP."
-    exit 1
-  fi
+- **Email:** suporte@seudominio.com
+- **GitHub Issues:** [Routine Backup BD Issues](https://github.com/imdsoliveira/routine-backup-bd/issues)
+- **Documentação Adicional:** Consulte os documentos oficiais do [PostgreSQL](https://www.postgresql.org/docs/) e do [Docker](https://docs.docker.com/).
 
-  for i in "${!BACKUP_LIST[@]}"; do
-    echo "$((i+1))). $(basename "${BACKUP_LIST[$i]}") - $(du -h "${BACKUP_LIST[$i]}" | cut -f1)"
-  done
-}
+---
 
-# Função para selecionar o backup
-selecionar_backup() {
-  echo ""
-  read -p "Digite o número do backup que deseja restaurar: " SELECAO
-
-  if ! [[ "$SELECAO" =~ ^[0-9]+$ ]]; then
-    echo "Entrada inválida. Por favor, insira um número."
-    exit 1
-  fi
-
-  if [ "$SELECAO" -lt 1 ] || [ "$SELECAO" -gt "${#BACKUP_LIST[@]}" ]; then
-    echo "Número fora do intervalo. Por favor, selecione um número válido."
-    exit 1
-  fi
-
-  BACKUP_SELECIONADO="${BACKUP_LIST[$((SELECAO-1))]}"
-  echo "Backup Selecionado: $(basename "$BACKUP_SELECIONADO")"
-}
-
-# Função para confirmar a restauração
-confirmar_restauracao() {
-  echo ""
-  read -p "Tem certeza que deseja restaurar este backup? Isso sobrescreverá o banco de dados atual. (yes/no): " CONFIRMA
-
-  case "$CONFIRMA" in
-    yes|Yes|YES)
-      ;;
-    *)
-      echo "Restauração cancelada pelo usuário."
-      exit 1
-      ;;
-  esac
-}
-
-# Função para realizar a restauração
-restaurar_backup() {
-  echo "Iniciando a restauração do backup..."
-  pg_restore -U "$USUARIO" -h "$HOST" -p "$PORTA" -d "$BANCO" -c "$BACKUP_SELECIONADO"
-  STATUS_RESTORE=$?
-
-  if [ $STATUS_RESTORE -eq 0 ]; then
-    echo "Restauração concluída com sucesso."
-  else
-    echo "Falha na restauração do backup." >&2
-    exit 1
-  fi
-}
-
-########################################
-# Execução do Script
-########################################
-
-listar_backups
-selecionar_backup
-confirmar_restauracao
-restaurar_backup
-```
-Tornar o Script Executável:
-
-```shell
-chmod +x /usr/local/bin/restore_postgres.sh
-```
-
-Testar o Script de Restauração Manualmente:
-
-```shell
-/usr/local/bin/restore_postgres.sh
-```
-
-
+**Agradecemos por utilizar o Routine Backup BD!**

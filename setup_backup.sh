@@ -96,9 +96,9 @@ done
 # Configurar diretório de backup no host
 BACKUP_DIR="/var/backups/postgres"
 echo_info "Criando diretório de backup em $BACKUP_DIR..."
-mkdir -p "$BACKUP_DIR"
-chown root:root "$BACKUP_DIR"
-chmod 700 "$BACKUP_DIR"
+sudo mkdir -p "$BACKUP_DIR"
+sudo chown root:root "$BACKUP_DIR"
+sudo chmod 700 "$BACKUP_DIR"
 
 # Verificar se o diretório de backup está montado no container
 MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "/var/backups/postgres" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME")
@@ -119,15 +119,15 @@ fi
 # Configurar o arquivo .pgpass
 PGPASS_FILE="/root/.pgpass"
 echo_info "Configurando arquivo .pgpass para autenticação automática..."
-echo "localhost:5432:postgres:$PG_USER:$PG_PASSWORD" > "$PGPASS_FILE"
-chown root:root "$PGPASS_FILE"
-chmod 600 "$PGPASS_FILE"
+echo "localhost:5432:postgres:$PG_USER:$PG_PASSWORD" | sudo tee "$PGPASS_FILE" > /dev/null
+sudo chown root:root "$PGPASS_FILE"
+sudo chmod 600 "$PGPASS_FILE"
 
 # Criar o script de backup
 BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
 echo_info "Criando script de backup em $BACKUP_SCRIPT..."
 
-cat <<EOF > "$BACKUP_SCRIPT"
+sudo tee "$BACKUP_SCRIPT" > /dev/null <<EOF
 #!/bin/bash
 
 # Script de Backup do PostgreSQL
@@ -139,29 +139,54 @@ BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
 RETENTION_DAYS="$RETENTION_DAYS"
 
-# Data e Hora Atual
-DATA=\$(date +%Y-%m-%d)
-HORA=\$(date +%H:%M:%S)
+# Funções para exibir mensagens coloridas
+function echo_info() {
+    echo -e "\e[34m[INFO]\e[0m \$1"
+}
+
+function echo_success() {
+    echo -e "\e[32m[SUCCESS]\e[0m \$1"
+}
+
+function echo_error() {
+    echo -e "\e[31m[ERROR]\e[0m \$1"
+}
+
+# Função para enviar webhook
+function enviar_webhook() {
+    local payload="\$1"
+    curl -s -X POST -H "Content-Type: application/json" -d "\$payload" "\$WEBHOOK_URL"
+}
+
+# Iniciar Backup
+echo_info "Iniciando backup do banco de dados '\$BANCO'..."
 
 # Nome do Arquivo de Backup
 ARQUIVO_BACKUP="postgres_backup_\$(date +%Y%m%d%H%M%S).backup"
 
-# Processo de Backup
-docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v -f "\$BACKUP_DIR/\$ARQUIVO_BACKUP" postgres
+# Caminho Completo do Backup
+CAMINHO_BACKUP="\$BACKUP_DIR/\$ARQUIVO_BACKUP"
+
+# Processo de Backup com Feedback ao Usuário
+echo_info "Realizando pg_dump para o banco de dados '\$BANCO'..."
+docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v -f "\$CAMINHO_BACKUP" "\$BANCO"
 STATUS_BACKUP=\$?
 
 # Verifica se o Backup foi Bem-Sucedido
 if [ \$STATUS_BACKUP -eq 0 ]; then
     STATUS="OK"
     NOTES="Backup executado conforme cron job configurado. Nenhum erro reportado durante o processo."
-    BACKUP_SIZE=\$(docker exec "\$CONTAINER_NAME" du -h "\$BACKUP_DIR/\$ARQUIVO_BACKUP" | cut -f1)
+    BACKUP_SIZE=\$(docker exec "\$CONTAINER_NAME" du -h "\$CAMINHO_BACKUP" | cut -f1)
+    echo_success "Backup concluído com sucesso: \$ARQUIVO_BACKUP, Tamanho: \$BACKUP_SIZE"
 else
     STATUS="ERRO"
     NOTES="Falha ao executar o backup. Verifique os logs para mais detalhes."
     BACKUP_SIZE="0B"
+    echo_error "Backup falhou: \$ARQUIVO_BACKUP"
 fi
 
 # Gerenciamento de Retenção
+echo_info "Verificando backups antigos que excedem \$RETENTION_DAYS dias..."
 BACKUPS_ANTIGOS=\$(find "\$BACKUP_DIR" -type f -name "postgres_backup_*.backup" -mtime +\$RETENTION_DAYS)
 
 DELETED_BACKUPS_JSON="[]"
@@ -170,6 +195,7 @@ if [ -n "\$BACKUPS_ANTIGOS" ]; then
     DELETED_BACKUPS=()
     for arquivo in \$BACKUPS_ANTIGOS; do
         nome_backup=\$(basename "\$arquivo")
+        echo_info "Removendo backup antigo: \$nome_backup"
         # Remove o Arquivo
         rm -f "\$arquivo"
         # Adiciona Detalhes ao JSON
@@ -179,7 +205,7 @@ if [ -n "\$BACKUPS_ANTIGOS" ]; then
     DELETED_BACKUPS_JSON=\$(IFS=, ; echo "[\${DELETED_BACKUPS[*]}]")
 fi
 
-# Enviar Notificação via Webhook
+# Preparar o Payload JSON
 PAYLOAD=\$(cat <<EOF_JSON
 {
     "action": "Backup realizado com sucesso",
@@ -195,20 +221,21 @@ PAYLOAD=\$(cat <<EOF_JSON
 EOF_JSON
 )
 
-curl -X POST -H "Content-Type: application/json" -d "\$PAYLOAD" "\$WEBHOOK_URL"
+# Enviar o Webhook
+enviar_webhook "\$PAYLOAD"
 
 # Log (Opcional)
 echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Backup \$STATUS: \$ARQUIVO_BACKUP, Size: \$BACKUP_SIZE" >> /var/log/backup_postgres.log
 echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Backups antigos removidos: \$DELETED_BACKUPS_JSON" >> /var/log/backup_postgres.log
 EOF
 
-chmod +x "$BACKUP_SCRIPT"
+sudo chmod +x "$BACKUP_SCRIPT"
 
-# Criar o script de restauração (Opcional)
+# Criar o script de restauração
 RESTORE_SCRIPT="/usr/local/bin/restore_postgres.sh"
 echo_info "Criando script de restauração em $RESTORE_SCRIPT..."
 
-cat <<EOF > "$RESTORE_SCRIPT"
+sudo tee "$RESTORE_SCRIPT" > /dev/null <<EOF
 #!/bin/bash
 
 # Script de Restauração do PostgreSQL
@@ -232,14 +259,21 @@ function echo_error() {
     echo -e "\e[31m[ERROR]\e[0m \$1"
 }
 
+# Função para enviar webhook
+function enviar_webhook() {
+    local payload="\$1"
+    curl -s -X POST -H "Content-Type: application/json" -d "\$payload" "\$WEBHOOK_URL"
+}
+
 # Listar Backups Disponíveis
-echo_info "Listando backups disponíveis:"
+echo_info "Listando backups disponíveis para restauração..."
 BACKUPS=(\$(docker exec "\$CONTAINER_NAME" ls "\$BACKUP_DIR" | grep "postgres_backup_.*\.backup"))
 if [ \${#BACKUPS[@]} -eq 0 ]; then
     echo_error "Nenhum backup encontrado em \$BACKUP_DIR."
     exit 1
 fi
 
+echo_info "Backups disponíveis:"
 for i in "\${!BACKUPS[@]}"; do
     echo "\$((i+1))). \${BACKUPS[\$i]}"
 done
@@ -268,7 +302,8 @@ if [[ "\$CONFIRM" != "yes" && "\$CONFIRM" != "Yes" && "\$CONFIRM" != "YES" ]]; t
     exit 0
 fi
 
-# Processo de Restauração
+# Processo de Restauração com Feedback ao Usuário
+echo_info "Iniciando restauração do backup '\$SELECTED_BACKUP'..."
 docker exec -t "\$CONTAINER_NAME" pg_restore -U "\$PG_USER" -d postgres -c "\$BACKUP_DIR/\$SELECTED_BACKUP"
 STATUS_RESTORE=\$?
 
@@ -276,12 +311,14 @@ STATUS_RESTORE=\$?
 if [ \$STATUS_RESTORE -eq 0 ]; then
     STATUS="OK"
     NOTES="Restauração executada com sucesso."
+    echo_success "Restauração concluída com sucesso: \$SELECTED_BACKUP"
 else
     STATUS="ERRO"
     NOTES="Falha ao executar a restauração. Verifique os logs para mais detalhes."
+    echo_error "Restauração falhou: \$SELECTED_BACKUP"
 fi
 
-# Enviar Notificação via Webhook
+# Preparar o Payload JSON
 PAYLOAD=\$(cat <<EOF_JSON
 {
     "action": "Restauração realizada com sucesso",
@@ -294,13 +331,14 @@ PAYLOAD=\$(cat <<EOF_JSON
 EOF_JSON
 )
 
-curl -X POST -H "Content-Type: application/json" -d "\$PAYLOAD" "\$WEBHOOK_URL"
+# Enviar o Webhook
+enviar_webhook "\$PAYLOAD"
 
 # Log (Opcional)
 echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Restauração \$STATUS: \$SELECTED_BACKUP" >> /var/log/backup_postgres.log
 EOF
 
-chmod +x "$RESTORE_SCRIPT"
+sudo chmod +x "$RESTORE_SCRIPT"
 
 # Configurar o cron job
 echo_info "Agendando cron job para backups automáticos diariamente às 00:00..."
