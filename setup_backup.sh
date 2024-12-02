@@ -60,13 +60,18 @@ else
     echo_info "Container PostgreSQL identificado: $CONTAINER_NAME"
 fi
 
-# Solicitar informações ao usuário
-read -p "Digite a URL do Webhook para notificações: " WEBHOOK_URL
+# Definir usuário padrão do PostgreSQL como 'postgres'
+DEFAULT_PG_USER="postgres"
+read -p "Deseja utilizar o usuário padrão do PostgreSQL ('postgres')? (yes/no): " USE_DEFAULT_USER
+if [[ "$USE_DEFAULT_USER" =~ ^(yes|Yes|YES)$ ]]; then
+    PG_USER="$DEFAULT_PG_USER"
+    echo_info "Usuário do PostgreSQL definido como: $PG_USER"
+else
+    read -p "Digite o usuário do PostgreSQL para backups: " PG_USER
+fi
 
-read -p "Digite o usuário do PostgreSQL para backups: " PG_USER
-
-# Solicitar a senha do PostgreSQL de forma segura
-read -s -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
+# Solicitar a senha do PostgreSQL (visível)
+read -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
 echo
 
 # Solicitar o período de retenção dos backups em dias (default: 30)
