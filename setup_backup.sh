@@ -83,20 +83,31 @@ if [[ "$USE_DEFAULT_USER" =~ ^(yes|Yes|YES)$ ]]; then
     echo_info "Usuário do PostgreSQL definido como: $PG_USER"
 else
     read -p "Digite o usuário do PostgreSQL para backups: " PG_USER
+    if [ -z "$PG_USER" ]; then
+        echo_error "Usuário do PostgreSQL não pode estar vazio."
+        exit 1
+    fi
+    echo_info "Usuário do PostgreSQL definido como: $PG_USER"
 fi
 
 # Solicitar a senha do PostgreSQL (visível)
 read -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
-echo
+if [ -z "$PG_PASSWORD" ]; then
+    echo_error "Senha do PostgreSQL não pode estar vazia."
+    exit 1
+fi
+echo_info "Senha do PostgreSQL recebida."
 
 # Solicitar o período de retenção dos backups em dias (default: 30)
 read -p "Digite o período de retenção dos backups em dias [30]: " RETENTION_DAYS
 RETENTION_DAYS=${RETENTION_DAYS:-30}
+echo_info "Período de retenção dos backups definido para: $RETENTION_DAYS dias."
 
 # Solicitar o Webhook URL e validar
 while true; do
     read -p "Digite a URL do Webhook para notificações: " WEBHOOK_URL
     if valid_url "$WEBHOOK_URL"; then
+        echo_info "URL do Webhook validada."
         break
     else
         echo_error "URL inválida. Certifique-se de que está no formato http:// ou https://"
@@ -110,6 +121,7 @@ echo "2) Backup apenas das tabelas do banco de dados"
 echo "3) Backup de tabelas específicas com inserts"
 read -p "Digite o número correspondente à opção desejada [1]: " BACKUP_OPTION
 BACKUP_OPTION=${BACKUP_OPTION:-1}
+echo_info "Opção de backup selecionada: $BACKUP_OPTION"
 
 # Configurar diretório de backup no host
 BACKUP_DIR="/var/backups/postgres"
@@ -134,8 +146,10 @@ if [ -z "$MOUNTED" ]; then
         echo_info "Por favor, monte o volume e reinicie o container. Em seguida, execute este script novamente."
         exit 1
     else
-        echo_info "Continuando com a configuração sem montar o volume..."
+        echo_warning "Continuando com a configuração sem montar o volume..."
     fi
+else
+    echo_info "Diretório de backup $BACKUP_DIR está montado no container $CONTAINER_NAME."
 fi
 
 # Remover e recriar o script de backup antigo, se existir
@@ -151,7 +165,10 @@ echo_info "Criando script de backup em $BACKUP_SCRIPT..."
 sudo tee "$BACKUP_SCRIPT" > /dev/null <<EOF
 #!/bin/bash
 
-# Script de Backup do PostgreSQL
+# backup_postgres.sh
+# Script de Backup Automático do PostgreSQL
+
+set -e  # Encerra o script em caso de erro
 
 # Definir variáveis
 PG_USER="$PG_USER"
@@ -271,7 +288,7 @@ for DB in \$SELECTED_DATABASES; do
     # Gerenciamento de Retenção
     echo_info "Verificando backups antigos do banco '\$DB' que excedem \$RETENTION_DAYS dias..."
     find "\$BACKUP_DIR" -type f -name "postgres_backup_*_\$DB.backup" -mtime +\$RETENTION_DAYS -exec rm -f {} \;
-
+    echo_success "Backups antigos do banco '\$DB' removidos."
 done
 
 # Adicionar timestamp ao arquivo de log
@@ -294,7 +311,10 @@ echo_info "Criando script de restauração em $RESTORE_SCRIPT..."
 sudo tee "$RESTORE_SCRIPT" > /dev/null <<EOF
 #!/bin/bash
 
-# Script de Restauração do PostgreSQL
+# restore_postgres.sh
+# Script de Restauração Automática do PostgreSQL
+
+set -e  # Encerra o script em caso de erro
 
 # Definir variáveis
 PG_USER="$PG_USER"
