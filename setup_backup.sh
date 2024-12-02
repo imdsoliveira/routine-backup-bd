@@ -112,11 +112,15 @@ BACKUP_OPTION=${BACKUP_OPTION:-1}
 
 # Configurar diretório de backup no host
 BACKUP_DIR="/var/backups/postgres"
-echo_info "Criando diretório de backup em $BACKUP_DIR..."
-sudo mkdir -p "$BACKUP_DIR"
-sudo chown root:root "$BACKUP_DIR"
-sudo chmod 700 "$BACKUP_DIR"
-echo_success "Diretório de backup criado com sucesso."
+if [ ! -d "$BACKUP_DIR" ]; then
+    echo_info "Criando diretório de backup em $BACKUP_DIR..."
+    sudo mkdir -p "$BACKUP_DIR"
+    sudo chown root:root "$BACKUP_DIR"
+    sudo chmod 700 "$BACKUP_DIR"
+    echo_success "Diretório de backup criado com sucesso."
+else
+    echo_info "Diretório de backup $BACKUP_DIR já existe."
+fi
 
 # Verificar se o diretório de backup está montado no container
 MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "/var/backups/postgres" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME")
@@ -133,8 +137,14 @@ if [ -z "$MOUNTED" ]; then
     fi
 fi
 
-# Criar o script de backup
+# Remover o script de backup antigo, se existir
 BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
+if [ -f "$BACKUP_SCRIPT" ]; then
+    echo_info "Removendo script de backup antigo..."
+    sudo rm "$BACKUP_SCRIPT"
+fi
+
+# Criar o script de backup
 echo_info "Criando script de backup em $BACKUP_SCRIPT..."
 
 sudo tee "$BACKUP_SCRIPT" > /dev/null <<EOF
