@@ -86,7 +86,7 @@ else
 fi
 
 # Solicitar a senha do PostgreSQL (visível)
-read -s -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
+read -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
 echo
 
 # Solicitar o período de retenção dos backups em dias (default: 30)
@@ -138,7 +138,7 @@ if [ -z "$MOUNTED" ]; then
     fi
 fi
 
-# Remover o script de backup antigo, se existir
+# Remover e recriar o script de backup antigo, se existir
 BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
 if [ -f "$BACKUP_SCRIPT" ]; then
     echo_info "Removendo script de backup antigo..."
@@ -281,10 +281,16 @@ EOF
 sudo chmod +x "$BACKUP_SCRIPT"
 echo_success "Script de backup criado com sucesso."
 
-# Criar o script de restauração
+# Remover e recriar o script de restauração antigo, se existir
 RESTORE_SCRIPT="/usr/local/bin/restore_postgres.sh"
-echo_info "Criando script de restauração em $RESTORE_SCRIPT..."
+if [ -f "$RESTORE_SCRIPT" ]; then
+    echo_info "Removendo script de restauração antigo..."
+    sudo rm "$RESTORE_SCRIPT"
+    echo_success "Script de restauração antigo removido."
+fi
 
+# Criar o script de restauração
+echo_info "Criando script de restauração em $RESTORE_SCRIPT..."
 sudo tee "$RESTORE_SCRIPT" > /dev/null <<EOF
 #!/bin/bash
 
@@ -393,12 +399,15 @@ echo_info "Iniciando restauração do backup '\$SELECTED_BACKUP' no banco '\$SEL
 # Determinar o tipo de backup com base no nome do arquivo
 if [[ "\$SELECTED_BACKUP" == *com_inserts.backup ]]; then
     # Backup com inserts (Formato Padrão)
+    echo_info "Restaurando backup completo com inserts..."
     docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d "\$SELECTED_DATABASE" -f "/var/backups/postgres/\$SELECTED_BACKUP"
 elif [[ "\$SELECTED_BACKUP" == *apenas_tabelas.backup ]]; then
     # Backup apenas das tabelas (Schema Only, formato Custom)
+    echo_info "Restaurando backup apenas das tabelas (Schema Only)..."
     docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" pg_restore -U "\$PG_USER" -d "\$SELECTED_DATABASE" -c "/var/backups/postgres/\$SELECTED_BACKUP"
 elif [[ "\$SELECTED_BACKUP" == *tabelas_especificas_com_inserts.backup ]]; then
     # Backup de tabelas específicas com inserts (Formato Padrão)
+    echo_info "Restaurando backup de tabelas específicas com inserts..."
     docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d "\$SELECTED_DATABASE" -f "/var/backups/postgres/\$SELECTED_BACKUP"
 else
     echo_error "Tipo de backup desconhecido. Não foi possível determinar o método de restauração."
@@ -434,7 +443,7 @@ EOF_JSON
 # Enviar o Webhook
 send_webhook "\$PAYLOAD"
 
-# Log (Opcional)
+# Log da Restauração
 echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Restauração \$STATUS: \$SELECTED_BACKUP no banco '\$SELECTED_DATABASE'" >> /var/log/backup_postgres.log
 EOF
 
@@ -453,7 +462,7 @@ read -p "Deseja executar o backup agora? (yes/no): " RUN_BACKUP
 case "$RUN_BACKUP" in
     yes|Yes|YES)
         echo_info "Executando backup..."
-        $BACKUP_SCRIPT
+        sudo "$BACKUP_SCRIPT"
         ;;
     *)
         echo_info "Não executando backup."
@@ -461,4 +470,5 @@ case "$RUN_BACKUP" in
 esac
 
 echo_info "Você pode executar o backup manualmente com: $BACKUP_SCRIPT"
+echo_info "Você pode restaurar backups com: $RESTORE_SCRIPT"
 echo_info "Script de configuração finalizado."
