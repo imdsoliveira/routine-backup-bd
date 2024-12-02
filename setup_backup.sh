@@ -5,21 +5,25 @@
 
 set -e  # Encerra o script em caso de erro
 
-# Funções para exibir mensagens coloridas
+# Funções para exibir mensagens coloridas com atraso
 function echo_info() {
     echo -e "\e[34m[INFO]\e[0m $1"
+    sleep 1
 }
 
 function echo_success() {
     echo -e "\e[32m[SUCCESS]\e[0m $1"
+    sleep 1
 }
 
 function echo_warning() {
     echo -e "\e[33m[WARNING]\e[0m $1"
+    sleep 1
 }
 
 function echo_error() {
     echo -e "\e[31m[ERROR]\e[0m $1"
+    sleep 1
 }
 
 # Função para verificar se um comando existe
@@ -31,6 +35,8 @@ function command_exists() {
 function valid_url() {
     [[ "$1" =~ ^https?://.+ ]]
 }
+
+echo_info "Iniciando processo de configuração..."
 
 # Verificar se Docker está instalado
 if ! command_exists docker; then
@@ -110,6 +116,7 @@ echo_info "Criando diretório de backup em $BACKUP_DIR..."
 sudo mkdir -p "$BACKUP_DIR"
 sudo chown root:root "$BACKUP_DIR"
 sudo chmod 700 "$BACKUP_DIR"
+echo_success "Diretório de backup criado com sucesso."
 
 # Verificar se o diretório de backup está montado no container
 MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "/var/backups/postgres" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME")
@@ -144,21 +151,25 @@ RETENTION_DAYS="$RETENTION_DAYS"
 BACKUP_OPTION="$BACKUP_OPTION"
 CONTAINER_NAME="$CONTAINER_NAME"
 
-# Funções para exibir mensagens coloridas
+# Funções para exibir mensagens coloridas com atraso
 function echo_info() {
     echo -e "\\e[34m[INFO]\\e[0m \$1" >&2
+    sleep 1
 }
 
 function echo_success() {
     echo -e "\\e[32m[SUCCESS]\\e[0m \$1" >&2
+    sleep 1
 }
 
 function echo_warning() {
     echo -e "\\e[33m[WARNING]\\e[0m \$1" >&2
+    sleep 1
 }
 
 function echo_error() {
     echo -e "\\e[31m[ERROR]\\e[0m \$1" >&2
+    sleep 1
 }
 
 # Função para enviar webhook
@@ -253,10 +264,30 @@ echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Fim do processo de backup" >> /var/log/backu
 EOF
 
 sudo chmod +x "$BACKUP_SCRIPT"
+echo_success "Script de backup criado com sucesso."
 
 # Configurar o cron job
 echo_info "Agendando cron job para backups automáticos diariamente às 00:00..."
 (crontab -l 2>/dev/null; echo "0 0 * * * $BACKUP_SCRIPT >> /var/log/backup_postgres_cron.log 2>&1") | crontab -
+echo_success "Cron job agendado com sucesso."
 
 echo_success "Configuração de backup concluída com sucesso!"
+
+# Perguntar se deseja executar backup/restauração
+read -p "Deseja executar o backup ou restauração agora? (backup/restore/no): " RUN_ACTION
+case "$RUN_ACTION" in
+    backup|Backup|BACKUP)
+        echo_info "Executando backup..."
+        $BACKUP_SCRIPT
+        ;;
+    restore|Restore|RESTORE)
+        echo_info "Executando restauração..."
+        $RESTORE_SCRIPT
+        ;;
+    *)
+        echo_info "Não executando backup ou restauração."
+        ;;
+esac
+
 echo_info "Você pode executar o backup manualmente com: $BACKUP_SCRIPT"
+echo_info "Script de configuração finalizado."
