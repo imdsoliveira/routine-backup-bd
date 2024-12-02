@@ -75,8 +75,8 @@ else
     read -p "Digite o usuário do PostgreSQL para backups: " PG_USER
 fi
 
-# Solicitar a senha do PostgreSQL (não visível)
-read -sp "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
+# Solicitar a senha do PostgreSQL (visível)
+read -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
 echo
 
 # Solicitar o período de retenção dos backups em dias (default: 30)
@@ -95,8 +95,9 @@ done
 
 # Opções de Backup
 echo_info "Selecione o tipo de backup que deseja configurar:"
-echo "1) Backup completo do banco de dados"
-echo "2) Backup de tabelas específicas com inserts"
+echo "1) Backup completo do banco de dados com inserts"
+echo "2) Backup apenas das tabelas do banco de dados"
+echo "3) Backup de tabelas específicas com inserts"
 read -p "Digite o número correspondente à opção desejada [1]: " BACKUP_OPTION
 BACKUP_OPTION=${BACKUP_OPTION:-1}
 
@@ -196,16 +197,18 @@ select DB in \$DATABASES "Todos"; do
 done
 
 # Opção de backup
-if [ "\$BACKUP_OPTION" -eq 2 ]; then
+if [ "\$BACKUP_OPTION" -eq 1 ]; then
+    # Backup completo do banco de dados com inserts
+    BACKUP_TYPE="completo_com_inserts"
+elif [ "\$BACKUP_OPTION" -eq 2 ]; then
+    # Backup apenas das tabelas do banco de dados
+    BACKUP_TYPE="apenas_tabelas"
+elif [ "\$BACKUP_OPTION" -eq 3 ]; then
     # Backup de tabelas específicas com inserts
-    read -p "Deseja fazer backup de tabelas específicas? (yes/no): " TABLE_BACKUP
-    if [[ "\$TABLE_BACKUP" =~ ^(yes|Yes|YES)$ ]]; then
-        read -p "Digite os nomes das tabelas que deseja fazer backup, separados por espaço: " -a TABLES
-        if [ \${#TABLES[@]} -eq 0 ]; then
-            echo_error "Nenhuma tabela selecionada para backup. Encerrando."
-            exit 1
-        fi
-    fi
+    BACKUP_TYPE="tabelas_especificas_com_inserts"
+else
+    echo_error "Opção de backup inválida."
+    exit 1
 fi
 
 # Iniciar Backup
@@ -219,23 +222,34 @@ for BANCO in \$SELECTED_DATABASES; do
     # Caminho Completo do Backup
     CAMINHO_BACKUP="\$BACKUP_DIR/\$ARQUIVO_BACKUP"
     
-    if [ "\$BACKUP_OPTION" -eq 1 ]; then
-        # Backup completo
-        echo_info "Realizando backup completo do banco de dados '\$BANCO'..."
-        docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v -f "\$CAMINHO_BACKUP" "\$BANCO"
-    elif [ "\$BACKUP_OPTION" -eq 2 ]; then
-        if [[ "\$TABLE_BACKUP" =~ ^(yes|Yes|YES)$ ]]; then
+    case "\$BACKUP_TYPE" in
+        "completo_com_inserts")
+            # Backup completo com inserts
+            echo_info "Realizando backup completo do banco de dados '\$BANCO' com inserts..."
+            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v -f "\$CAMINHO_BACKUP" "\$BANCO"
+            ;;
+        "apenas_tabelas")
+            # Backup apenas das tabelas
+            echo_info "Realizando backup apenas das tabelas do banco de dados '\$BANCO'..."
+            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v --schema-only -f "\$CAMINHO_BACKUP" "\$BANCO"
+            ;;
+        "tabelas_especificas_com_inserts")
             # Backup de tabelas específicas com inserts
-            echo_info "Realizando backup das tabelas especificadas no banco de dados '\$BANCO'..."
+            echo_info "Realizando backup de tabelas específicas com inserts no banco de dados '\$BANCO'..."
+            read -p "Digite os nomes das tabelas que deseja fazer backup, separados por espaço: " -a TABLES
+            if [ \${#TABLES[@]} -eq 0 ]; then
+                echo_error "Nenhuma tabela selecionada para backup. Pulando este banco de dados."
+                continue
+            fi
             TABLES_STRING=\$(printf ",\"%s\"" "\${TABLES[@]}")
             TABLES_STRING=\${TABLES_STRING:1}  # Remover a primeira vírgula
             docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -d "\$BANCO" --format=custom --data-only --inserts --column-inserts --table "\$TABLES_STRING" -f "\$CAMINHO_BACKUP"
-        else
-            # Backup completo se não desejar tabelas específicas
-            echo_info "Realizando backup completo do banco de dados '\$BANCO'..."
-            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v -f "\$CAMINHO_BACKUP" "\$BANCO"
-        fi
-    fi
+            ;;
+        *)
+            echo_error "Tipo de backup desconhecido. Pulando este banco de dados."
+            continue
+            ;;
+    esac
     
     STATUS_BACKUP=\$?
     
@@ -396,7 +410,7 @@ read -p "Tem certeza que deseja restaurar este backup? Isso sobrescreverá o ban
 
 if [[ "\$CONFIRM" != "yes" && "\$CONFIRM" != "Yes" && "\$CONFIRM" != "YES" ]]; then
     echo_info "Restauração cancelada pelo usuário."
-    exit 0
+    exit 1
 fi
 
 # Processo de Restauração com Feedback ao Usuário
