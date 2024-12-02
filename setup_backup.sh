@@ -29,21 +29,15 @@ if ! command_exists docker; then
     exit 1
 fi
 
-# Identificar containers PostgreSQL
+# Identificar containers PostgreSQL (imagem contendo 'postgres')
 echo_info "Identificando containers PostgreSQL em execução..."
-# Utilizar uma combinação de filtros para detectar containers PostgreSQL
-POSTGRES_CONTAINERS=$(docker ps --filter "ancestor=postgres" --filter "ancestor=postgres:latest" --filter "ancestor=postgres:11" --format "{{.Names}}")
-
-if [ -z "$POSTGRES_CONTAINERS" ]; then
-    # Tentar detectar containers com base em variáveis de ambiente ou nomes comuns
-    POSTGRES_CONTAINERS=$(docker ps --filter "ancestor=postgres" --filter "ancestor=postgres:11" --filter "ancestor=postgres:12" --filter "ancestor=postgres:13" --format "{{.Names}}")
-fi
+POSTGRES_CONTAINERS=$(docker ps --format "{{.Names}} {{.Image}}" | grep -i 'postgres' | awk '{print $1}')
 
 if [ -z "$POSTGRES_CONTAINERS" ]; then
     echo_error "Nenhum container PostgreSQL encontrado em execução."
     read -p "Deseja continuar configurando manualmente? (yes/no): " MANUAL_CONFIG
     if [[ "$MANUAL_CONFIG" =~ ^(yes|Yes|YES)$ ]]; then
-        read -p "Por favor, insira o nome do container PostgreSQL: " CONTAINER_NAME
+        read -p "Por favor, insira o nome do container PostgreSQL que deseja configurar: " CONTAINER_NAME
         # Verificar se o container existe e está rodando
         if ! docker ps --format "{{.Names}}" | grep -qw "$CONTAINER_NAME"; then
             echo_error "Nome do container inválido ou container não está rodando."
@@ -53,19 +47,17 @@ if [ -z "$POSTGRES_CONTAINERS" ]; then
         echo_info "Encerrando o script de configuração."
         exit 1
     fi
-else
-    if [ $(echo "$POSTGRES_CONTAINERS" | wc -l) -gt 1 ]; then
-        echo_info "Múltiplos containers PostgreSQL encontrados:"
-        echo "$POSTGRES_CONTAINERS"
-        read -p "Por favor, insira o nome do container PostgreSQL que deseja configurar: " CONTAINER_NAME
-        if ! echo "$POSTGRES_CONTAINERS" | grep -qw "$CONTAINER_NAME"; then
-            echo_error "Nome do container inválido."
-            exit 1
-        fi
-    else
-        CONTAINER_NAME="$POSTGRES_CONTAINERS"
-        echo_info "Container PostgreSQL identificado: $CONTAINER_NAME"
+elif [ $(echo "$POSTGRES_CONTAINERS" | wc -l) -gt 1 ]; then
+    echo_info "Múltiplos containers PostgreSQL encontrados:"
+    echo "$POSTGRES_CONTAINERS"
+    read -p "Por favor, insira o nome do container PostgreSQL que deseja configurar: " CONTAINER_NAME
+    if ! echo "$POSTGRES_CONTAINERS" | grep -qw "$CONTAINER_NAME"; then
+        echo_error "Nome do container inválido."
+        exit 1
     fi
+else
+    CONTAINER_NAME="$POSTGRES_CONTAINERS"
+    echo_info "Container PostgreSQL identificado: $CONTAINER_NAME"
 fi
 
 # Solicitar informações ao usuário
@@ -207,7 +199,7 @@ PG_USER="$PG_USER"
 BACKUP_DIR="/var/backups/postgres"
 WEBHOOK_URL="$WEBHOOK_URL"
 
-# Função para exibir mensagens coloridas
+# Funções para exibir mensagens coloridas
 function echo_info() {
     echo -e "\e[34m[INFO]\e[0m \$1"
 }
