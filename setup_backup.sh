@@ -56,6 +56,9 @@ if [ -z "$POSTGRES_CONTAINERS" ]; then
         echo_info "Encerrando o script de configuração."
         exit 0
     fi
+elif [ $(echo "$POSTGRES_CONTAINERS" | wc -l) -eq 1 ]; then
+    CONTAINER_NAME="$POSTGRES_CONTAINERS"
+    echo_info "Container PostgreSQL identificado: $CONTAINER_NAME"
 else
     echo_info "Containers PostgreSQL encontrados:"
     echo "$POSTGRES_CONTAINERS"
@@ -76,9 +79,8 @@ else
     read -p "Digite o usuário do PostgreSQL para backups: " PG_USER
 fi
 
-# Solicitar a senha do PostgreSQL (oculta)
-read -s -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
-echo
+# Solicitar a senha do PostgreSQL (visível)
+read -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
 
 # Solicitar o período de retenção dos backups em dias (default: 30)
 read -p "Digite o período de retenção dos backups em dias [30]: " RETENTION_DAYS
