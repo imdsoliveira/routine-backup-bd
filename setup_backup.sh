@@ -124,12 +124,12 @@ if [ -z "$MOUNTED" ]; then
     fi
 fi
 
-# Configurar o arquivo .pgpass
-PGPASS_FILE="/root/.pgpass"
-echo_info "Configurando arquivo .pgpass para autenticação automática..."
-echo "localhost:5432:postgres:$PG_USER:$PG_PASSWORD" | sudo tee "$PGPASS_FILE" > /dev/null
-sudo chown root:root "$PGPASS_FILE"
-sudo chmod 600 "$PGPASS_FILE"
+# Configurar o arquivo .pgpass no host (não será usado diretamente dentro do container)
+# Portanto, removemos esta parte, pois não afeta o container
+# echo_info "Configurando arquivo .pgpass para autenticação automática..."
+# echo "localhost:5432:postgres:$PG_USER:$PG_PASSWORD" | sudo tee "$PGPASS_FILE" > /dev/null
+# sudo chown root:root "$PGPASS_FILE"
+# sudo chmod 600 "$PGPASS_FILE"
 
 # Criar o script de backup
 BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
@@ -142,6 +142,7 @@ sudo tee "$BACKUP_SCRIPT" > /dev/null <<EOF
 
 # Configurações
 PG_USER="$PG_USER"
+PG_PASSWORD="$PG_PASSWORD"
 BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
 RETENTION_DAYS="$RETENTION_DAYS"
@@ -169,7 +170,7 @@ function enviar_webhook() {
 
 # Listar bancos de dados disponíveis
 echo_info "Listando bancos de dados disponíveis no container '\$CONTAINER_NAME'..."
-DATABASES=\$(docker exec -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate = false;")
+DATABASES=\$(docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate = false;")
 if [ -z "\$DATABASES" ]; then
     echo_error "Nenhum banco de dados encontrado para backup."
     exit 1
@@ -220,12 +221,12 @@ for BANCO in \$SELECTED_DATABASES; do
         "completo_com_inserts")
             # Backup completo com inserts (Formato Padrão)
             echo_info "Realizando backup completo do banco de dados '\$BANCO' com inserts..."
-            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F p --inserts -v -f "\$CAMINHO_BACKUP" "\$BANCO"
+            docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F p --inserts -v -f "/var/backups/postgres/\$ARQUIVO_BACKUP" "\$BANCO"
             ;;
         "apenas_tabelas")
-            # Backup apenas das tabelas (Schema Only)
+            # Backup apenas das tabelas (Schema Only, formato Custom)
             echo_info "Realizando backup apenas das tabelas do banco de dados '\$BANCO'..."
-            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v --schema-only -f "\$CAMINHO_BACKUP" "\$BANCO"
+            docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -F c -b -v --schema-only -f "/var/backups/postgres/\$ARQUIVO_BACKUP" "\$BANCO"
             ;;
         "tabelas_especificas_com_inserts")
             # Backup de tabelas específicas com inserts
@@ -237,7 +238,7 @@ for BANCO in \$SELECTED_DATABASES; do
             fi
             TABLES_STRING=\$(printf ",\"%s\"" "\${TABLES[@]}")
             TABLES_STRING=\${TABLES_STRING:1}  # Remover a primeira vírgula
-            docker exec -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -d "\$BANCO" --format=plain --data-only --inserts --column-inserts --table "\$TABLES_STRING" -f "\$CAMINHO_BACKUP"
+            docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" pg_dump -U "\$PG_USER" -d "\$BANCO" --format=plain --data-only --inserts --column-inserts --table "\$TABLES_STRING" -f "/var/backups/postgres/\$ARQUIVO_BACKUP"
             ;;
         *)
             echo_error "Tipo de backup desconhecido. Pulando este banco de dados."
@@ -251,7 +252,7 @@ for BANCO in \$SELECTED_DATABASES; do
     if [ \$STATUS_BACKUP -eq 0 ]; then
         STATUS="OK"
         NOTES="Backup executado conforme cron job configurado. Nenhum erro reportado durante o processo."
-        BACKUP_SIZE=\$(docker exec "\$CONTAINER_NAME" du -h "\$CAMINHO_BACKUP" | cut -f1)
+        BACKUP_SIZE=\$(docker exec -t "\$CONTAINER_NAME" du -h "/var/backups/postgres/\$ARQUIVO_BACKUP" | cut -f1)
         echo_success "Backup concluído com sucesso: \$ARQUIVO_BACKUP, Tamanho: \$BACKUP_SIZE"
     else
         STATUS="ERRO"
@@ -284,7 +285,7 @@ for BANCO in \$SELECTED_DATABASES; do
     PAYLOAD=\$(cat <<EOF_JSON
 {
     "action": "Backup realizado com sucesso",
-    "date": "\$(date '+%d/%m/%Y %H:%M:%S')",
+    "date": "$(date '+%d/%m/%Y %H:%M:%S')",
     "database_name": "\$BANCO",
     "backup_file": "\$ARQUIVO_BACKUP",
     "backup_size": "\$BACKUP_SIZE",
@@ -318,6 +319,7 @@ sudo tee "$RESTORE_SCRIPT" > /dev/null <<EOF
 
 # Configurações
 PG_USER="$PG_USER"
+PG_PASSWORD="$PG_PASSWORD"
 BACKUP_DIR="$BACKUP_DIR"
 WEBHOOK_URL="$WEBHOOK_URL"
 CONTAINER_NAME="$CONTAINER_NAME"
@@ -343,7 +345,7 @@ function enviar_webhook() {
 
 # Listar bancos de dados disponíveis
 echo_info "Listando bancos de dados disponíveis no container '\$CONTAINER_NAME'..."
-DATABASES=\$(docker exec -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate = false;")
+DATABASES=\$(docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate = false;")
 if [ -z "\$DATABASES" ]; then
     echo_error "Nenhum banco de dados encontrado para restauração."
     exit 1
@@ -398,7 +400,7 @@ read -p "Tem certeza que deseja restaurar este backup? Isso sobrescreverá o ban
 
 if [[ "\$CONFIRM" != "yes" && "\$CONFIRM" != "Yes" && "\$CONFIRM" != "YES" ]]; then
     echo_info "Restauração cancelada pelo usuário."
-    exit 0
+    exit 1
 fi
 
 # Processo de Restauração com Feedback ao Usuário
@@ -407,13 +409,13 @@ echo_info "Iniciando restauração do backup '\$SELECTED_BACKUP' no banco '\$SEL
 # Determinar o tipo de backup com base no nome do arquivo
 if [[ "\$SELECTED_BACKUP" == *com_inserts.backup ]]; then
     # Backup com inserts (Formato Padrão)
-    docker exec -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d "\$SELECTED_DATABASE" -f "\$BACKUP_DIR/\$SELECTED_BACKUP"
+    docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d "\$SELECTED_DATABASE" -f "/var/backups/postgres/\$SELECTED_BACKUP"
 elif [[ "\$SELECTED_BACKUP" == *apenas_tabelas.backup ]]; then
     # Backup apenas das tabelas (Schema Only, formato Custom)
-    docker exec -t "\$CONTAINER_NAME" pg_restore -U "\$PG_USER" -d "\$SELECTED_DATABASE" -c "\$BACKUP_DIR/\$SELECTED_BACKUP"
+    docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" pg_restore -U "\$PG_USER" -d "\$SELECTED_DATABASE" -c "/var/backups/postgres/\$SELECTED_BACKUP"
 elif [[ "\$SELECTED_BACKUP" == *tabelas_especificas_com_inserts.backup ]]; then
     # Backup de tabelas específicas com inserts (Formato Padrão)
-    docker exec -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d "\$SELECTED_DATABASE" -f "\$BACKUP_DIR/\$SELECTED_BACKUP"
+    docker exec -e PGPASSWORD="\$PG_PASSWORD" -t "\$CONTAINER_NAME" psql -U "\$PG_USER" -d "\$SELECTED_DATABASE" -f "/var/backups/postgres/\$SELECTED_BACKUP"
 else
     echo_error "Tipo de backup desconhecido. Não foi possível determinar o método de restauração."
     exit 1
@@ -436,11 +438,11 @@ fi
 PAYLOAD=\$(cat <<EOF_JSON
 {
     "action": "Restauração realizada com sucesso",
-    "date": "\$(date '+%d/%m/%Y %H:%M:%S')",
-    "database_name": "\$SELECTED_DATABASE",
-    "backup_file": "\$SELECTED_BACKUP",
-    "status": "\$STATUS",
-    "notes": "\$NOTES"
+    "date": "$(date '+%d/%m/%Y %H:%M:%S')",
+    "database_name": "$SELECTED_DATABASE",
+    "backup_file": "$SELECTED_BACKUP",
+    "status": "$STATUS",
+    "notes": "$NOTES"
 }
 EOF_JSON
 )

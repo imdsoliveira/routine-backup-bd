@@ -2,31 +2,6 @@
 
 **Rotina de backup de banco de dados PostgreSQL com opção de restauração**
 
----
-
-## Índice
-
-1. [Visão Geral](#visão-geral)
-2. [Requisitos](#requisitos)
-3. [Configuração Inicial](#configuração-inicial)
-    - [1. Preparação do Ambiente](#1-preparação-do-ambiente)
-    - [2. Montagem do Diretório de Backups no Container](#2-montagem-do-diretório-de-backups-no-container)
-4. [Instalação e Configuração](#instalação-e-configuração)
-    - [1. Executando o Script de Configuração](#1-executando-o-script-de-configuração)
-    - [2. Configurando Autenticação Automática](#2-configurando-autenticação-automática)
-    - [3. Configurando Notificações via Webhook](#3-configurando-notificações-via-webhook)
-5. [Operações Manuais](#operações-manuais)
-    - [1. Executando o Backup Manualmente](#1-executando-o-backup-manualmente)
-    - [2. Restaurando um Backup Manualmente](#2-restaurando-um-backup-manualmente)
-    - [3. Removendo Arquivos de Backup Manualmente](#3-removendo-arquivos-de-backup-manualmente)
-6. [Automatização com Cron](#automatização-com-cron)
-7. [Monitoramento e Logs](#monitoramento-e-logs)
-8. [Boas Práticas e Considerações de Segurança](#boas-práticas-e-considerações-de-segurança)
-9. [FAQ](#faq)
-10. [Suporte](#suporte)
-
----
-
 ## Visão Geral
 
 O **Routine Backup BD** é uma solução automatizada para realizar backups periódicos de bancos de dados PostgreSQL em ambientes Dockerizados. Além da criação automática de backups, o sistema oferece opções de restauração e notificações via webhook para monitoramento em tempo real.
@@ -63,8 +38,6 @@ Antes de iniciar a configuração, certifique-se de que os seguintes componentes
     ```bash
     curl --version
     ```
-
----
 
 ## Configuração Inicial
 
