@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager para Docker
-# Versão: 3.1.0
+# Versão: 3.2.0
 # Autor: System Administrator
 # Data: 2024
 # =============================================================================
@@ -187,93 +187,96 @@ PG_PASSWORD="$PG_PASSWORD"
 RETENTION_DAYS="$RETENTION_DAYS"
 WEBHOOK_URL="$WEBHOOK_URL"
 BACKUP_OPTION="$BACKUP_OPTION"
-CONTAINER_NAME="$CONTAINER_NAME"
 BACKUP_DIR="$BACKUP_DIR"
 LOG_FILE="$LOG_FILE"
 EOF
 
     chmod 600 "$ENV_FILE"
     echo_success "Configurações salvas em $ENV_FILE."
-fi
 
-# =============================================================================
-# Configurar Diretório de Backup no Host
-# =============================================================================
+    # Identificar e atualizar o nome do container dinamicamente
+    function find_container() {
+        # Encontrar todos os containers que usam a imagem 'postgres'
+        local CONTAINERS=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}")
+        if [ -z "$CONTAINERS" ]; then
+            echo_error "Nenhum container PostgreSQL encontrado com a imagem 'postgres'."
+            return 1
+        elif [ $(echo "$CONTAINERS" | wc -l) -eq 1 ]; then
+            echo "$CONTAINERS"
+            return 0
+        else
+            echo_info "Múltiplos containers PostgreSQL encontrados:"
+            echo "$CONTAINERS"
+            read -p "Por favor, insira o nome do container PostgreSQL que deseja configurar: " CONTAINER_NAME
+            if ! echo "$CONTAINERS" | grep -qw "$CONTAINER_NAME"; then
+                echo_error "Nome do container inválido."
+                return 1
+            fi
+            echo "$CONTAINER_NAME"
+            return 0
+        fi
+    }
 
-if [ ! -d "$BACKUP_DIR" ]; then
-    echo_info "Criando diretório de backup em $BACKUP_DIR..."
-    sudo mkdir -p "$BACKUP_DIR"
-    sudo chown root:root "$BACKUP_DIR"
-    sudo chmod 700 "$BACKUP_DIR"
-    echo_success "Diretório de backup criado com sucesso."
-else
-    echo_info "Diretório de backup $BACKUP_DIR já existe."
-fi
-
-# =============================================================================
-# Verificar Montagem do Diretório de Backup no Container
-# =============================================================================
-
-# Função para encontrar o container dinamicamente
-function find_container() {
-    # Tenta encontrar o container pelo nome do serviço
-    # Supondo que o serviço se chama 'postgres', ajuste conforme necessário
-    local SERVICE_NAME=$(echo "$CONTAINER_NAME" | cut -d'.' -f1)
-    local CONTAINER=$(docker ps --filter "name=$SERVICE_NAME" --format "{{.Names}}")
-    
-    if [ -z "$CONTAINER" ]; then
-        echo_error "Nenhum container encontrado para o serviço '$SERVICE_NAME'."
-        return 1
-    else
-        echo "$CONTAINER"
-        return 0
-    fi
-}
-
-# Atualizar o nome do container dinamicamente
-CONTAINER_NAME_DYNAMIC=$(find_container)
-if [ $? -ne 0 ]; then
-    echo_error "Não foi possível identificar o container PostgreSQL em execução."
-    exit 1
-else
-    CONTAINER_NAME="$CONTAINER_NAME_DYNAMIC"
-    echo_info "Container PostgreSQL identificado dinamicamente: $CONTAINER_NAME"
-fi
-
-# Atualizar o .env com o nome dinâmico do container
-sed -i "s/^CONTAINER_NAME=\".*\"/CONTAINER_NAME=\"$CONTAINER_NAME\"/" "$ENV_FILE"
-
-# Verificar montagem do diretório
-MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "'"$BACKUP_DIR"'" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME" || true)
-if [ -z "$MOUNTED" ]; then
-    echo_warning "O diretório de backup $BACKUP_DIR não está montado no container $CONTAINER_NAME."
-    echo_info "Para continuar, você precisa montar o diretório de backup no container."
-    echo_info "Isso pode requerer a reinicialização do container com a opção -v."
-    read -p "Deseja interromper o script para montar o volume manualmente? (yes/no): " MOUNT_VOLUME
-    if [[ "$MOUNT_VOLUME" =~ ^(yes|Yes|YES)$ ]]; then
-        echo_info "Por favor, monte o volume e reinicie o container. Em seguida, execute este script novamente."
+    CONTAINER_NAME_DYNAMIC=$(find_container)
+    if [ $? -ne 0 ]; then
+        echo_error "Não foi possível identificar o container PostgreSQL em execução."
         exit 1
     else
-        echo_warning "Continuando com a configuração sem montar o volume..."
+        CONTAINER_NAME="$CONTAINER_NAME_DYNAMIC"
+        echo_info "Container PostgreSQL identificado dinamicamente: $CONTAINER_NAME"
     fi
-else
-    echo_info "Diretório de backup $BACKUP_DIR está montado no container $CONTAINER_NAME."
-fi
 
-# =============================================================================
-# Remover e Recriar os Scripts de Backup e Restauração
-# =============================================================================
+    # Atualizar o .env com o nome dinâmico do container
+    sed -i "s/^CONTAINER_NAME=\".*\"/CONTAINER_NAME=\"$CONTAINER_NAME\"/" "$ENV_FILE" || echo "CONTAINER_NAME=\"$CONTAINER_NAME\"" >> "$ENV_FILE"
 
-# Remover o script de backup antigo, se existir
-if [ -f "$BACKUP_SCRIPT" ]; then
-    echo_info "Removendo script de backup antigo..."
-    sudo rm -f "$BACKUP_SCRIPT"
-    echo_success "Script de backup antigo removido."
-fi
+    # =============================================================================
+    # Configurar Diretório de Backup no Host
+    # =============================================================================
 
-# Criar o script de backup
-echo_info "Criando script de backup em $BACKUP_SCRIPT..."
-sudo tee "$BACKUP_SCRIPT" > /dev/null <<'EOF'
+    if [ ! -d "$BACKUP_DIR" ]; then
+        echo_info "Criando diretório de backup em $BACKUP_DIR..."
+        sudo mkdir -p "$BACKUP_DIR"
+        sudo chown root:root "$BACKUP_DIR"
+        sudo chmod 700 "$BACKUP_DIR"
+        echo_success "Diretório de backup criado com sucesso."
+    else
+        echo_info "Diretório de backup $BACKUP_DIR já existe."
+    fi
+
+    # =============================================================================
+    # Verificar Montagem do Diretório de Backup no Container
+    # =============================================================================
+
+    MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "'"$BACKUP_DIR"'" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME" || true)
+    if [ -z "$MOUNTED" ]; then
+        echo_warning "O diretório de backup $BACKUP_DIR não está montado no container $CONTAINER_NAME."
+        echo_info "Para continuar, você precisa montar o diretório de backup no container."
+        echo_info "Isso pode requerer a reinicialização do container com a opção -v."
+        read -p "Deseja interromper o script para montar o volume manualmente? (yes/no): " MOUNT_VOLUME
+        if [[ "$MOUNT_VOLUME" =~ ^(yes|Yes|YES)$ ]]; then
+            echo_info "Por favor, monte o volume e reinicie o container. Em seguida, execute este script novamente."
+            exit 1
+        else
+            echo_warning "Continuando com a configuração sem montar o volume..."
+        fi
+    else
+        echo_info "Diretório de backup $BACKUP_DIR está montado no container $CONTAINER_NAME."
+    fi
+
+    # =============================================================================
+    # Remover e Recriar os Scripts de Backup e Restauração
+    # =============================================================================
+
+    # Remover o script de backup antigo, se existir
+    if [ -f "$BACKUP_SCRIPT" ]; then
+        echo_info "Removendo script de backup antigo..."
+        sudo rm -f "$BACKUP_SCRIPT"
+        echo_success "Script de backup antigo removido."
+    fi
+
+    # Criar o script de backup
+    echo_info "Criando script de backup em $BACKUP_SCRIPT..."
+    sudo tee "$BACKUP_SCRIPT" > /dev/null <<'EOF'
 #!/bin/bash
 
 # backup_postgres.sh
@@ -316,6 +319,36 @@ function send_webhook() {
     local payload="$1"
     curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
 }
+
+# Função para identificar o container PostgreSQL dinamicamente
+function find_postgres_container() {
+    # Encontrar todos os containers que usam a imagem 'postgres'
+    local CONTAINERS=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}")
+    if [ -z "$CONTAINERS" ]; then
+        echo_error "Nenhum container PostgreSQL encontrado com a imagem 'postgres'."
+        exit 1
+    elif [ $(echo "$CONTAINERS" | wc -l) -eq 1 ]; then
+        echo "$CONTAINERS"
+    else
+        echo_info "Múltiplos containers PostgreSQL encontrados:"
+        echo "$CONTAINERS"
+        read -p "Por favor, insira o nome do container PostgreSQL que deseja usar para backup: " SELECTED_CONTAINER
+        if ! echo "$CONTAINERS" | grep -qw "$SELECTED_CONTAINER"; then
+            echo_error "Nome do container inválido."
+            exit 1
+        fi
+        echo "$SELECTED_CONTAINER"
+    fi
+}
+
+# Atualizar dinamicamente o nome do container
+CONTAINER_NAME_DYNAMIC=$(find_postgres_container)
+if [ -n "$CONTAINER_NAME_DYNAMIC" ]; then
+    CONTAINER_NAME="$CONTAINER_NAME_DYNAMIC"
+else
+    echo_error "Não foi possível identificar o container PostgreSQL."
+    exit 1
+fi
 
 # Garantir criação do diretório de logs
 mkdir -p "$(dirname "$LOG_FILE")" || true
@@ -480,6 +513,36 @@ function send_webhook() {
     local payload="$1"
     curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
 }
+
+# Função para identificar o container PostgreSQL dinamicamente
+function find_postgres_container() {
+    # Encontrar todos os containers que usam a imagem 'postgres'
+    local CONTAINERS=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}")
+    if [ -z "$CONTAINERS" ]; then
+        echo_error "Nenhum container PostgreSQL encontrado com a imagem 'postgres'."
+        exit 1
+    elif [ $(echo "$CONTAINERS" | wc -l) -eq 1 ]; then
+        echo "$CONTAINERS"
+    else
+        echo_info "Múltiplos containers PostgreSQL encontrados:"
+        echo "$CONTAINERS"
+        read -p "Por favor, insira o nome do container PostgreSQL que deseja usar para restauração: " SELECTED_CONTAINER
+        if ! echo "$CONTAINERS" | grep -qw "$SELECTED_CONTAINER"; then
+            echo_error "Nome do container inválido."
+            exit 1
+        fi
+        echo "$SELECTED_CONTAINER"
+    fi
+}
+
+# Atualizar dinamicamente o nome do container
+CONTAINER_NAME_DYNAMIC=$(find_postgres_container)
+if [ -n "$CONTAINER_NAME_DYNAMIC" ]; then
+    CONTAINER_NAME="$CONTAINER_NAME_DYNAMIC"
+else
+    echo_error "Não foi possível identificar o container PostgreSQL."
+    exit 1
+fi
 
 # Garantir criação do diretório de logs
 mkdir -p "$(dirname "$LOG_FILE")" || true
