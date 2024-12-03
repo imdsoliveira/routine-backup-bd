@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager para Docker
-# Versão: 3.0.0
+# Versão: 3.1.0
 # Autor: System Administrator
 # Data: 2024
 # =============================================================================
@@ -147,7 +147,8 @@ if [ ! -f "$ENV_FILE" ]; then
     fi
 
     # Solicitar a senha do PostgreSQL (visível)
-    read -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
+    read -sp "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
+    echo ""
     if [ -z "$PG_PASSWORD" ]; then
         echo_error "Senha do PostgreSQL não pode estar vazia."
         exit 1
@@ -213,6 +214,36 @@ fi
 # Verificar Montagem do Diretório de Backup no Container
 # =============================================================================
 
+# Função para encontrar o container dinamicamente
+function find_container() {
+    # Tenta encontrar o container pelo nome do serviço
+    # Supondo que o serviço se chama 'postgres', ajuste conforme necessário
+    local SERVICE_NAME=$(echo "$CONTAINER_NAME" | cut -d'.' -f1)
+    local CONTAINER=$(docker ps --filter "name=$SERVICE_NAME" --format "{{.Names}}")
+    
+    if [ -z "$CONTAINER" ]; then
+        echo_error "Nenhum container encontrado para o serviço '$SERVICE_NAME'."
+        return 1
+    else
+        echo "$CONTAINER"
+        return 0
+    fi
+}
+
+# Atualizar o nome do container dinamicamente
+CONTAINER_NAME_DYNAMIC=$(find_container)
+if [ $? -ne 0 ]; then
+    echo_error "Não foi possível identificar o container PostgreSQL em execução."
+    exit 1
+else
+    CONTAINER_NAME="$CONTAINER_NAME_DYNAMIC"
+    echo_info "Container PostgreSQL identificado dinamicamente: $CONTAINER_NAME"
+fi
+
+# Atualizar o .env com o nome dinâmico do container
+sed -i "s/^CONTAINER_NAME=\".*\"/CONTAINER_NAME=\"$CONTAINER_NAME\"/" "$ENV_FILE"
+
+# Verificar montagem do diretório
 MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "'"$BACKUP_DIR"'" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME" || true)
 if [ -z "$MOUNTED" ]; then
     echo_warning "O diretório de backup $BACKUP_DIR não está montado no container $CONTAINER_NAME."
@@ -579,7 +610,7 @@ echo_success "Script de restauração criado com sucesso em $RESTORE_SCRIPT."
 # =============================================================================
 
 echo_info "Agendando cron job para backups automáticos diariamente às 00:00..."
-(crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT"; echo "0 0 * * * $BACKUP_SCRIPT >> /var/log/backup_postgres_cron.log 2>&1") | crontab -
+(crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT"; echo "0 0 * * * $BACKUP_SCRIPT >> $LOG_FILE 2>&1") | crontab -
 echo_success "Cron job agendado com sucesso."
 
 # =============================================================================
