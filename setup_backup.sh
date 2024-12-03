@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager para Docker
-# Versão: 2.0.0
+# Versão: 3.0.0
 # Autor: System Administrator
 # Data: 2024
 # =============================================================================
@@ -16,9 +16,12 @@
 # - Retenção configurável
 # =============================================================================
 
-set -e  # Encerra o script em caso de erro
+set -euo pipefail
 
-# Funções para exibir mensagens coloridas com atraso
+# =============================================================================
+# Funções de Utilidade
+# =============================================================================
+
 function echo_info() {
     echo -e "\e[34m[INFO]\e[0m $1"
     sleep 1
@@ -49,103 +52,153 @@ function valid_url() {
     [[ "$1" =~ ^https?://.+ ]]
 }
 
-# Definir variáveis
-LOG_FILE="/var/log/backup_postgres.log"
+# =============================================================================
+# Definição de Variáveis
+# =============================================================================
 
-# Garantir criação do diretório de logs
+ENV_FILE="/root/.backup_postgres.env"
+LOG_FILE="/var/log/backup_postgres.log"
+BACKUP_DIR="/var/backups/postgres"
+BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
+RESTORE_SCRIPT="/usr/local/bin/restore_postgres.sh"
+
+# =============================================================================
+# Garantir Criação do Diretório de Logs
+# =============================================================================
+
 mkdir -p "$(dirname "$LOG_FILE")" || true
 touch "$LOG_FILE" || true
 chmod 644 "$LOG_FILE" || true
 
 echo_info "Iniciando processo de configuração..."
 
-# Verificar se Docker está instalado
+# =============================================================================
+# Verificar se Docker está Instalado
+# =============================================================================
+
 if ! command_exists docker; then
     echo_error "Docker não está instalado. Por favor, instale o Docker antes de executar este script."
     exit 1
 fi
 
-# Identificar containers PostgreSQL (imagem contendo 'postgres')
-echo_info "Identificando containers PostgreSQL em execução..."
-POSTGRES_CONTAINERS=$(docker ps --format "{{.Names}} {{.Image}}" | grep -i 'postgres' | awk '{print $1}')
+# =============================================================================
+# Carregar Configurações Existentes ou Solicitar Novas
+# =============================================================================
 
-if [ -z "$POSTGRES_CONTAINERS" ]; then
-    echo_warning "Nenhum container PostgreSQL encontrado em execução."
-    read -p "Deseja continuar configurando manualmente? (yes/no): " MANUAL_CONFIG
-    if [[ "$MANUAL_CONFIG" =~ ^(yes|Yes|YES)$ ]]; then
+if [ -f "$ENV_FILE" ]; then
+    echo_info "Configurações existentes encontradas:"
+    cat "$ENV_FILE"
+    echo ""
+    read -p "Deseja usar estas configurações? (yes/no): " USE_EXISTING
+    if [[ "$USE_EXISTING" =~ ^(yes|Yes|YES)$ ]]; then
+        source "$ENV_FILE"
+        echo_success "Configurações carregadas do $ENV_FILE."
+    else
+        echo_info "Configurando novas opções."
+        rm -f "$ENV_FILE"
+    fi
+fi
+
+if [ ! -f "$ENV_FILE" ]; then
+    # Identificar containers PostgreSQL (imagem contendo 'postgres')
+    echo_info "Identificando containers PostgreSQL em execução..."
+    POSTGRES_CONTAINERS=$(docker ps --format "{{.Names}} {{.Image}}" | grep -i 'postgres' | awk '{print $1}')
+
+    if [ -z "$POSTGRES_CONTAINERS" ]; then
+        echo_warning "Nenhum container PostgreSQL encontrado em execução."
+        read -p "Deseja continuar configurando manualmente? (yes/no): " MANUAL_CONFIG
+        if [[ "$MANUAL_CONFIG" =~ ^(yes|Yes|YES)$ ]]; then
+            read -p "Por favor, insira o nome do container PostgreSQL que deseja configurar: " CONTAINER_NAME
+            # Verificar se o container existe e está rodando
+            if ! docker ps --format "{{.Names}}" | grep -qw "$CONTAINER_NAME"; then
+                echo_error "Nome do container inválido ou container não está rodando."
+                exit 1
+            fi
+        else
+            echo_info "Encerrando o script de configuração."
+            exit 0
+        fi
+    elif [ $(echo "$POSTGRES_CONTAINERS" | wc -l) -eq 1 ]; then
+        CONTAINER_NAME="$POSTGRES_CONTAINERS"
+        echo_info "Container PostgreSQL identificado: $CONTAINER_NAME"
+    else
+        echo_info "Containers PostgreSQL encontrados:"
+        echo "$POSTGRES_CONTAINERS"
         read -p "Por favor, insira o nome do container PostgreSQL que deseja configurar: " CONTAINER_NAME
-        # Verificar se o container existe e está rodando
-        if ! docker ps --format "{{.Names}}" | grep -qw "$CONTAINER_NAME"; then
-            echo_error "Nome do container inválido ou container não está rodando."
+        if ! echo "$POSTGRES_CONTAINERS" | grep -qw "$CONTAINER_NAME"; then
+            echo_error "Nome do container inválido."
             exit 1
         fi
+    fi
+
+    # Definir usuário padrão do PostgreSQL como 'postgres'
+    DEFAULT_PG_USER="postgres"
+    read -p "Deseja utilizar o usuário padrão do PostgreSQL ('postgres')? (yes/no): " USE_DEFAULT_USER
+    if [[ "$USE_DEFAULT_USER" =~ ^(yes|Yes|YES)$ ]]; then
+        PG_USER="$DEFAULT_PG_USER"
+        echo_info "Usuário do PostgreSQL definido como: $PG_USER"
     else
-        echo_info "Encerrando o script de configuração."
+        read -p "Digite o usuário do PostgreSQL para backups: " PG_USER
+        if [ -z "$PG_USER" ]; then
+            echo_error "Usuário do PostgreSQL não pode estar vazio."
+            exit 1
+        fi
+        echo_info "Usuário do PostgreSQL definido como: $PG_USER"
+    fi
+
+    # Solicitar a senha do PostgreSQL (visível)
+    read -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
+    if [ -z "$PG_PASSWORD" ]; then
+        echo_error "Senha do PostgreSQL não pode estar vazia."
         exit 1
     fi
-elif [ $(echo "$POSTGRES_CONTAINERS" | wc -l) -eq 1 ]; then
-    CONTAINER_NAME="$POSTGRES_CONTAINERS"
-    echo_info "Container PostgreSQL identificado: $CONTAINER_NAME"
-else
-    echo_info "Containers PostgreSQL encontrados:"
-    echo "$POSTGRES_CONTAINERS"
-    read -p "Por favor, insira o nome do container PostgreSQL que deseja configurar: " CONTAINER_NAME
-    if ! echo "$POSTGRES_CONTAINERS" | grep -qw "$CONTAINER_NAME"; then
-        echo_error "Nome do container inválido."
-        exit 1
-    fi
+    echo_info "Senha do PostgreSQL recebida."
+
+    # Solicitar o período de retenção dos backups em dias (default: 30)
+    read -p "Digite o período de retenção dos backups em dias [30]: " RETENTION_DAYS
+    RETENTION_DAYS=${RETENTION_DAYS:-30}
+    echo_info "Período de retenção dos backups definido para: $RETENTION_DAYS dias."
+
+    # Solicitar o Webhook URL e validar
+    while true; do
+        read -p "Digite a URL do Webhook para notificações: " WEBHOOK_URL
+        if valid_url "$WEBHOOK_URL"; then
+            echo_info "URL do Webhook validada."
+            break
+        else
+            echo_error "URL inválida. Certifique-se de que está no formato http:// ou https://"
+        fi
+    done
+
+    # Opções de Backup
+    echo_info "Selecione o tipo de backup que deseja configurar:"
+    echo "1) Backup completo do banco de dados com inserts"
+    echo "2) Backup apenas das tabelas do banco de dados"
+    echo "3) Backup de tabelas específicas com inserts"
+    read -p "Digite o número correspondente à opção desejada [1]: " BACKUP_OPTION
+    BACKUP_OPTION=${BACKUP_OPTION:-1}
+    echo_info "Opção de backup selecionada: $BACKUP_OPTION"
+
+    # Salvar configurações no arquivo .env
+    cat > "$ENV_FILE" <<EOF
+PG_USER="$PG_USER"
+PG_PASSWORD="$PG_PASSWORD"
+RETENTION_DAYS="$RETENTION_DAYS"
+WEBHOOK_URL="$WEBHOOK_URL"
+BACKUP_OPTION="$BACKUP_OPTION"
+CONTAINER_NAME="$CONTAINER_NAME"
+BACKUP_DIR="$BACKUP_DIR"
+LOG_FILE="$LOG_FILE"
+EOF
+
+    chmod 600 "$ENV_FILE"
+    echo_success "Configurações salvas em $ENV_FILE."
 fi
 
-# Definir usuário padrão do PostgreSQL como 'postgres'
-DEFAULT_PG_USER="postgres"
-read -p "Deseja utilizar o usuário padrão do PostgreSQL ('postgres')? (yes/no): " USE_DEFAULT_USER
-if [[ "$USE_DEFAULT_USER" =~ ^(yes|Yes|YES)$ ]]; then
-    PG_USER="$DEFAULT_PG_USER"
-    echo_info "Usuário do PostgreSQL definido como: $PG_USER"
-else
-    read -p "Digite o usuário do PostgreSQL para backups: " PG_USER
-    if [ -z "$PG_USER" ]; then
-        echo_error "Usuário do PostgreSQL não pode estar vazio."
-        exit 1
-    fi
-    echo_info "Usuário do PostgreSQL definido como: $PG_USER"
-fi
+# =============================================================================
+# Configurar Diretório de Backup no Host
+# =============================================================================
 
-# Solicitar a senha do PostgreSQL (visível)
-read -p "Digite a senha do usuário PostgreSQL: " PG_PASSWORD
-if [ -z "$PG_PASSWORD" ]; then
-    echo_error "Senha do PostgreSQL não pode estar vazia."
-    exit 1
-fi
-echo_info "Senha do PostgreSQL recebida."
-
-# Solicitar o período de retenção dos backups em dias (default: 30)
-read -p "Digite o período de retenção dos backups em dias [30]: " RETENTION_DAYS
-RETENTION_DAYS=${RETENTION_DAYS:-30}
-echo_info "Período de retenção dos backups definido para: $RETENTION_DAYS dias."
-
-# Solicitar o Webhook URL e validar
-while true; do
-    read -p "Digite a URL do Webhook para notificações: " WEBHOOK_URL
-    if valid_url "$WEBHOOK_URL"; then
-        echo_info "URL do Webhook validada."
-        break
-    else
-        echo_error "URL inválida. Certifique-se de que está no formato http:// ou https://"
-    fi
-done
-
-# Opções de Backup
-echo_info "Selecione o tipo de backup que deseja configurar:"
-echo "1) Backup completo do banco de dados com inserts"
-echo "2) Backup apenas das tabelas do banco de dados"
-echo "3) Backup de tabelas específicas com inserts"
-read -p "Digite o número correspondente à opção desejada [1]: " BACKUP_OPTION
-BACKUP_OPTION=${BACKUP_OPTION:-1}
-echo_info "Opção de backup selecionada: $BACKUP_OPTION"
-
-# Configurar diretório de backup no host
-BACKUP_DIR="/var/backups/postgres"
 if [ ! -d "$BACKUP_DIR" ]; then
     echo_info "Criando diretório de backup em $BACKUP_DIR..."
     sudo mkdir -p "$BACKUP_DIR"
@@ -156,8 +209,11 @@ else
     echo_info "Diretório de backup $BACKUP_DIR já existe."
 fi
 
-# Verificar se o diretório de backup está montado no container
-MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "/var/backups/postgres" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME")
+# =============================================================================
+# Verificar Montagem do Diretório de Backup no Container
+# =============================================================================
+
+MOUNTED=$(docker inspect -f '{{ range .Mounts }}{{ if eq .Destination "'"$BACKUP_DIR"'" }}{{ .Source }}{{ end }}{{ end }}' "$CONTAINER_NAME" || true)
 if [ -z "$MOUNTED" ]; then
     echo_warning "O diretório de backup $BACKUP_DIR não está montado no container $CONTAINER_NAME."
     echo_info "Para continuar, você precisa montar o diretório de backup no container."
@@ -173,11 +229,14 @@ else
     echo_info "Diretório de backup $BACKUP_DIR está montado no container $CONTAINER_NAME."
 fi
 
-# Remover e recriar o script de backup antigo, se existir
-BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
+# =============================================================================
+# Remover e Recriar os Scripts de Backup e Restauração
+# =============================================================================
+
+# Remover o script de backup antigo, se existir
 if [ -f "$BACKUP_SCRIPT" ]; then
     echo_info "Removendo script de backup antigo..."
-    sudo rm "$BACKUP_SCRIPT"
+    sudo rm -f "$BACKUP_SCRIPT"
     echo_success "Script de backup antigo removido."
 fi
 
@@ -189,46 +248,45 @@ sudo tee "$BACKUP_SCRIPT" > /dev/null <<'EOF'
 # backup_postgres.sh
 # Script de Backup Automático do PostgreSQL
 
-set -e  # Encerra o script em caso de erro
+set -euo pipefail
 
-# Definir variáveis
-PG_USER="postgres"
-PG_PASSWORD="sua_senha"
-BACKUP_DIR="/var/backups/postgres"
-WEBHOOK_URL="https://seu.webhook.url"
-RETENTION_DAYS=30
-BACKUP_OPTION=1
-CONTAINER_NAME="nome_do_container"
+# Carregar variáveis do .env
+ENV_FILE="/root/.backup_postgres.env"
+if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+else
+    echo_error "Arquivo de configuração $ENV_FILE não encontrado."
+    exit 1
+fi
 
 # Funções para exibir mensagens coloridas com atraso
 function echo_info() {
-    echo -e "\\e[34m[INFO]\\e[0m \$1" >&2
+    echo -e "\e[34m[INFO]\e[0m $1" >&2
     sleep 1
 }
 
 function echo_success() {
-    echo -e "\\e[32m[SUCCESS]\\e[0m \$1" >&2
+    echo -e "\e[32m[SUCCESS]\e[0m $1" >&2
     sleep 1
 }
 
 function echo_warning() {
-    echo -e "\\e[33m[WARNING]\\e[0m \$1" >&2
+    echo -e "\e[33m[WARNING]\e[0m $1" >&2
     sleep 1
 }
 
 function echo_error() {
-    echo -e "\\e[31m[ERROR]\\e[0m \$1" >&2
+    echo -e "\e[31m[ERROR]\e[0m $1" >&2
     sleep 1
 }
 
 # Função para enviar webhook
 function send_webhook() {
-    local payload="\$1"
-    curl -s -X POST -H "Content-Type: application/json" -d "\$payload" "\$WEBHOOK_URL"
+    local payload="$1"
+    curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
 }
 
 # Garantir criação do diretório de logs
-LOG_FILE="/var/log/backup_postgres.log"
 mkdir -p "$(dirname "$LOG_FILE")" || true
 touch "$LOG_FILE" || true
 chmod 644 "$LOG_FILE" || true
@@ -265,7 +323,21 @@ for DB in $SELECTED_DATABASES; do
 
     # Nome do Arquivo de Backup
     TIMESTAMP=$(date +%Y%m%d%H%M%S)
-    BACKUP_FILENAME="postgres_backup_${TIMESTAMP}_${DB}.backup"
+    case "$BACKUP_OPTION" in
+        1)
+            BACKUP_FILENAME="postgres_backup_${TIMESTAMP}_${DB}.backup"
+            ;;
+        2)
+            BACKUP_FILENAME="postgres_backup_${TIMESTAMP}_${DB}_schema.backup"
+            ;;
+        3)
+            BACKUP_FILENAME="postgres_backup_${TIMESTAMP}_${DB}_specific_tables.backup"
+            ;;
+        *)
+            echo_error "Tipo de backup desconhecido. Pulando este banco de dados." | tee -a "$LOG_FILE"
+            continue
+            ;;
+    esac
     BACKUP_PATH="${BACKUP_DIR}/${BACKUP_FILENAME}"
 
     case "$BACKUP_OPTION" in
@@ -302,11 +374,11 @@ for DB in $SELECTED_DATABASES; do
     # Verifica se o Backup foi Bem-Sucedido
     if [ $STATUS_BACKUP -eq 0 ]; then
         BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
-        BACKUP_INFO="{ \"database\": \"$DB\", \"filename\": \"$BACKUP_FILENAME\", \"status\": \"success\", \"size\": \"$BACKUP_SIZE\" }"
-        echo_success "Backup concluído com sucesso para o banco '$DB': $BACKUP_FILENAME (Tamanho: $BACKUP_SIZE)" | tee -a "$LOG_FILE"
+        BACKUP_INFO="{ \"database\": \"$DB\", \"filename\": \"$(basename "$BACKUP_PATH")\", \"status\": \"success\", \"size\": \"$BACKUP_SIZE\" }"
+        echo_success "Backup concluído com sucesso para o banco '$DB': $(basename "$BACKUP_PATH") (Tamanho: $BACKUP_SIZE)" | tee -a "$LOG_FILE"
     else
-        BACKUP_INFO="{ \"database\": \"$DB\", \"filename\": \"$BACKUP_FILENAME\", \"status\": \"failure\", \"size\": \"0\" }"
-        echo_error "Backup falhou para o banco '$DB': $BACKUP_FILENAME" | tee -a "$LOG_FILE"
+        BACKUP_INFO="{ \"database\": \"$DB\", \"filename\": \"$(basename "$BACKUP_PATH")\", \"status\": \"failure\", \"size\": \"0\" }"
+        echo_error "Backup falhou para o banco '$DB': $(basename "$BACKUP_PATH")" | tee -a "$LOG_FILE"
     fi
 
     # Enviar notificação via webhook
@@ -314,7 +386,7 @@ for DB in $SELECTED_DATABASES; do
 
     # Gerenciamento de Retenção
     echo_info "Verificando backups antigos do banco '$DB' que excedem $RETENTION_DAYS dias..." | tee -a "$LOG_FILE"
-    find "$BACKUP_DIR" -type f -name "postgres_backup_*_${DB}.backup" -mtime +$RETENTION_DAYS -exec rm -f {} \;
+    find "$BACKUP_DIR" -type f -name "postgres_backup_*_${DB}*.backup" -mtime +$RETENTION_DAYS -exec rm -f {} \;
     echo_success "Backups antigos do banco '$DB' removidos." | tee -a "$LOG_FILE"
 done
 
@@ -323,13 +395,12 @@ echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Fim do processo de backup" >> "$LOG_FILE"
 EOF
 
 sudo chmod +x "$BACKUP_SCRIPT"
-echo_success "Script de backup criado com sucesso."
+echo_success "Script de backup criado com sucesso em $BACKUP_SCRIPT."
 
-# Remover e recriar o script de restauração antigo, se existir
-RESTORE_SCRIPT="/usr/local/bin/restore_postgres.sh"
+# Remover o script de restauração antigo, se existir
 if [ -f "$RESTORE_SCRIPT" ]; then
     echo_info "Removendo script de restauração antigo..."
-    sudo rm "$RESTORE_SCRIPT"
+    sudo rm -f "$RESTORE_SCRIPT"
     echo_success "Script de restauração antigo removido."
 fi
 
@@ -341,44 +412,45 @@ sudo tee "$RESTORE_SCRIPT" > /dev/null <<'EOF'
 # restore_postgres.sh
 # Script de Restauração Automática do PostgreSQL
 
-set -e  # Encerra o script em caso de erro
+set -euo pipefail
 
-# Definir variáveis
-PG_USER="postgres"
-PG_PASSWORD="sua_senha"
-BACKUP_DIR="/var/backups/postgres"
-WEBHOOK_URL="https://seu.webhook.url"
-CONTAINER_NAME="nome_do_container"
+# Carregar variáveis do .env
+ENV_FILE="/root/.backup_postgres.env"
+if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+else
+    echo_error "Arquivo de configuração $ENV_FILE não encontrado."
+    exit 1
+fi
 
 # Funções para exibir mensagens coloridas com atraso
 function echo_info() {
-    echo -e "\\e[34m[INFO]\\e[0m \$1" >&2
+    echo -e "\e[34m[INFO]\e[0m $1" >&2
     sleep 1
 }
 
 function echo_success() {
-    echo -e "\\e[32m[SUCCESS]\\e[0m \$1" >&2
+    echo -e "\e[32m[SUCCESS]\e[0m $1" >&2
     sleep 1
 }
 
 function echo_warning() {
-    echo -e "\\e[33m[WARNING]\\e[0m \$1" >&2
+    echo -e "\e[33m[WARNING]\e[0m $1" >&2
     sleep 1
 }
 
 function echo_error() {
-    echo -e "\\e[31m[ERROR]\\e[0m \$1" >&2
+    echo -e "\e[31m[ERROR]\e[0m $1" >&2
     sleep 1
 }
 
 # Função para enviar webhook
 function send_webhook() {
-    local payload="\$1"
-    curl -s -X POST -H "Content-Type: application/json" -d "\$payload" "\$WEBHOOK_URL"
+    local payload="$1"
+    curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
 }
 
 # Garantir criação do diretório de logs
-LOG_FILE="/var/log/backup_postgres.log"
 mkdir -p "$(dirname "$LOG_FILE")" || true
 touch "$LOG_FILE" || true
 chmod 644 "$LOG_FILE" || true
@@ -482,7 +554,7 @@ fi
 # Preparar o Payload JSON
 PAYLOAD=$(cat <<EOF_JSON
 {
-    "action": "Restauração realizada com sucesso",
+    "action": "Restauração realizada",
     "date": "$(date '+%d/%m/%Y %H:%M:%S')",
     "database_name": "$SELECTED_DATABASE",
     "backup_file": "$SELECTED_BACKUP",
@@ -500,16 +572,23 @@ echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Restauração $STATUS: $SELECTED_BACKUP no b
 EOF
 
 sudo chmod +x "$RESTORE_SCRIPT"
-echo_success "Script de restauração criado com sucesso."
+echo_success "Script de restauração criado com sucesso em $RESTORE_SCRIPT."
 
-# Configurar o cron job
+# =============================================================================
+# Configurar o Cron Job
+# =============================================================================
+
 echo_info "Agendando cron job para backups automáticos diariamente às 00:00..."
-(crontab -l 2>/dev/null; echo "0 0 * * * $BACKUP_SCRIPT >> /var/log/backup_postgres_cron.log 2>&1") | crontab -
+(crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT"; echo "0 0 * * * $BACKUP_SCRIPT >> /var/log/backup_postgres_cron.log 2>&1") | crontab -
 echo_success "Cron job agendado com sucesso."
+
+# =============================================================================
+# Finalização da Configuração
+# =============================================================================
 
 echo_success "Configuração de backup concluída com sucesso!"
 
-# Perguntar se deseja executar backup
+# Perguntar se deseja executar o backup
 read -p "Deseja executar o backup agora? (yes/no): " RUN_BACKUP
 case "$RUN_BACKUP" in
     yes|Yes|YES)
