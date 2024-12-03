@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager para Docker
-# Versão: 3.2.0
+# Versão: 3.2.1
 # Autor: System Administrator
 # Data: 2024
 # =============================================================================
@@ -102,7 +102,7 @@ fi
 if [ ! -f "$ENV_FILE" ]; then
     # Identificar containers PostgreSQL (imagem contendo 'postgres')
     echo_info "Identificando containers PostgreSQL em execução..."
-    POSTGRES_CONTAINERS=$(docker ps --format "{{.Names}} {{.Image}}" | grep -i 'postgres' | awk '{print $1}')
+    POSTGRES_CONTAINERS=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}")
 
     if [ -z "$POSTGRES_CONTAINERS" ]; then
         echo_warning "Nenhum container PostgreSQL encontrado em execução."
@@ -189,45 +189,11 @@ WEBHOOK_URL="$WEBHOOK_URL"
 BACKUP_OPTION="$BACKUP_OPTION"
 BACKUP_DIR="$BACKUP_DIR"
 LOG_FILE="$LOG_FILE"
+CONTAINER_NAME="$CONTAINER_NAME"
 EOF
 
     chmod 600 "$ENV_FILE"
     echo_success "Configurações salvas em $ENV_FILE."
-
-    # Identificar e atualizar o nome do container dinamicamente
-    function find_container() {
-        # Encontrar todos os containers que usam a imagem 'postgres'
-        local CONTAINERS=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}")
-        if [ -z "$CONTAINERS" ]; then
-            echo_error "Nenhum container PostgreSQL encontrado com a imagem 'postgres'."
-            return 1
-        elif [ $(echo "$CONTAINERS" | wc -l) -eq 1 ]; then
-            echo "$CONTAINERS"
-            return 0
-        else
-            echo_info "Múltiplos containers PostgreSQL encontrados:"
-            echo "$CONTAINERS"
-            read -p "Por favor, insira o nome do container PostgreSQL que deseja configurar: " CONTAINER_NAME
-            if ! echo "$CONTAINERS" | grep -qw "$CONTAINER_NAME"; then
-                echo_error "Nome do container inválido."
-                return 1
-            fi
-            echo "$CONTAINER_NAME"
-            return 0
-        fi
-    }
-
-    CONTAINER_NAME_DYNAMIC=$(find_container)
-    if [ $? -ne 0 ]; then
-        echo_error "Não foi possível identificar o container PostgreSQL em execução."
-        exit 1
-    else
-        CONTAINER_NAME="$CONTAINER_NAME_DYNAMIC"
-        echo_info "Container PostgreSQL identificado dinamicamente: $CONTAINER_NAME"
-    fi
-
-    # Atualizar o .env com o nome dinâmico do container
-    sed -i "s/^CONTAINER_NAME=\".*\"/CONTAINER_NAME=\"$CONTAINER_NAME\"/" "$ENV_FILE" || echo "CONTAINER_NAME=\"$CONTAINER_NAME\"" >> "$ENV_FILE"
 
     # =============================================================================
     # Configurar Diretório de Backup no Host
@@ -458,19 +424,19 @@ done
 echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Fim do processo de backup" >> "$LOG_FILE"
 EOF
 
-sudo chmod +x "$BACKUP_SCRIPT"
-echo_success "Script de backup criado com sucesso em $BACKUP_SCRIPT."
+    sudo chmod +x "$BACKUP_SCRIPT"
+    echo_success "Script de backup criado com sucesso em $BACKUP_SCRIPT."
 
-# Remover o script de restauração antigo, se existir
-if [ -f "$RESTORE_SCRIPT" ]; then
-    echo_info "Removendo script de restauração antigo..."
-    sudo rm -f "$RESTORE_SCRIPT"
-    echo_success "Script de restauração antigo removido."
-fi
+    # Remover o script de restauração antigo, se existir
+    if [ -f "$RESTORE_SCRIPT" ]; then
+        echo_info "Removendo script de restauração antigo..."
+        sudo rm -f "$RESTORE_SCRIPT"
+        echo_success "Script de restauração antigo removido."
+    fi
 
-# Criar o script de restauração
-echo_info "Criando script de restauração em $RESTORE_SCRIPT..."
-sudo tee "$RESTORE_SCRIPT" > /dev/null <<'EOF'
+    # Criar o script de restauração
+    echo_info "Criando script de restauração em $RESTORE_SCRIPT..."
+    sudo tee "$RESTORE_SCRIPT" > /dev/null <<'EOF'
 #!/bin/bash
 
 # restore_postgres.sh
@@ -665,35 +631,36 @@ send_webhook "$PAYLOAD"
 echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Restauração $STATUS: $SELECTED_BACKUP no banco '$SELECTED_DATABASE'" >> "$LOG_FILE"
 EOF
 
-sudo chmod +x "$RESTORE_SCRIPT"
-echo_success "Script de restauração criado com sucesso em $RESTORE_SCRIPT."
+    sudo chmod +x "$RESTORE_SCRIPT"
+    echo_success "Script de restauração criado com sucesso em $RESTORE_SCRIPT."
 
-# =============================================================================
-# Configurar o Cron Job
-# =============================================================================
+    # =============================================================================
+    # Configurar o Cron Job
+    # =============================================================================
 
-echo_info "Agendando cron job para backups automáticos diariamente às 00:00..."
-(crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT"; echo "0 0 * * * $BACKUP_SCRIPT >> $LOG_FILE 2>&1") | crontab -
-echo_success "Cron job agendado com sucesso."
+    echo_info "Agendando cron job para backups automáticos diariamente às 00:00..."
+    (crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT"; echo "0 0 * * * $BACKUP_SCRIPT >> $LOG_FILE 2>&1") | crontab -
+    echo_success "Cron job agendado com sucesso."
 
-# =============================================================================
-# Finalização da Configuração
-# =============================================================================
+    # =============================================================================
+    # Finalização da Configuração
+    # =============================================================================
 
-echo_success "Configuração de backup concluída com sucesso!"
+    echo_success "Configuração de backup concluída com sucesso!"
 
-# Perguntar se deseja executar o backup
-read -p "Deseja executar o backup agora? (yes/no): " RUN_BACKUP
-case "$RUN_BACKUP" in
-    yes|Yes|YES)
-        echo_info "Executando backup..."
-        sudo "$BACKUP_SCRIPT"
-        ;;
-    *)
-        echo_info "Não executando backup."
-        ;;
-esac
+    # Perguntar se deseja executar o backup
+    read -p "Deseja executar o backup agora? (yes/no): " RUN_BACKUP
+    case "$RUN_BACKUP" in
+        yes|Yes|YES)
+            echo_info "Executando backup..."
+            sudo "$BACKUP_SCRIPT"
+            ;;
+        *)
+            echo_info "Não executando backup."
+            ;;
+    esac
 
-echo_info "Você pode executar o backup manualmente com: $BACKUP_SCRIPT"
-echo_info "Você pode restaurar backups com: $RESTORE_SCRIPT"
-echo_info "Script de configuração finalizado."
+    echo_info "Você pode executar o backup manualmente com: $BACKUP_SCRIPT"
+    echo_info "Você pode restaurar backups com: $RESTORE_SCRIPT"
+    echo_info "Script de configuração finalizado."
+fi
