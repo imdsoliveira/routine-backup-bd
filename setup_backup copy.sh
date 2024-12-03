@@ -27,12 +27,6 @@ readonly LOG_FILE="/var/log/backup_postgres.log"
 readonly MAX_LOG_SIZE=$((50 * 1024 * 1024)) # 50MB
 readonly BACKUP_DIR="/var/backups/postgres"
 
-# Criar diretórios necessários
-mkdir -p "$(dirname "$LOG_FILE")" "$BACKUP_DIR"
-touch "$LOG_FILE"
-chmod 644 "$LOG_FILE"
-chmod 700 "$BACKUP_DIR"
-
 # Funções de Utilidade
 function echo_info() { echo -e "\e[34m[INFO]\e[0m $1" | tee -a "$LOG_FILE"; sleep 1; }
 function echo_success() { echo -e "\e[32m[SUCCESS]\e[0m $1" | tee -a "$LOG_FILE"; sleep 1; }
@@ -106,8 +100,7 @@ function check_volume_mount() {
         echo_error "Volume $BACKUP_DIR não está montado no container $CONTAINER_NAME"
         echo_info "Para corrigir, execute:"
         echo_info "  1. docker volume create postgres_backup"
-        echo_info "  2. docker volume inspect postgres_backup # Para ver o mountpoint"
-        echo_info "  3. Adicione ao container: -v postgres_backup:$BACKUP_DIR"
+        echo_info "  2. Adicione ao container: -v postgres_backup:$BACKUP_DIR"
         return 1
     fi
     return 0
@@ -211,20 +204,16 @@ function do_restore() {
     done
     
     echo_info "Backups disponíveis para $DB:"
-    mapfile -t BACKUPS < <(find "$BACKUP_DIR" -type f \( -name "postgres_backup_*_${DB}.sql.gz" -o -name "postgres_backup_*_${DB}.backup" \) -print | sort -r)
+    mapfile -t BACKUPS < <(ls -1 "$BACKUP_DIR" | grep "postgres_backup_.*_${DB}.sql.gz$" || true)
     
     if [ ${#BACKUPS[@]} -eq 0 ]; then
-        echo_error "Nenhum backup encontrado para $DB em $BACKUP_DIR"
-        echo "Conteúdo do diretório de backup:"
-        ls -la "$BACKUP_DIR"
+        echo_error "Nenhum backup encontrado para $DB"
         return 1
     fi
     
-    echo "Backups disponíveis:"
+    echo "Selecione o backup para restauração:"
     for i in "${!BACKUPS[@]}"; do
-        local file_size=$(ls -lh "${BACKUPS[$i]}" | awk '{print $5}')
-        local file_date=$(ls -l "${BACKUPS[$i]}" | awk '{print $6, $7, $8}')
-        echo "$((i+1))) $(basename "${BACKUPS[$i]}") (Tamanho: $file_size, Data: $file_date)"
+        echo "$((i+1))) ${BACKUPS[$i]}"
     done
     
     while true; do
@@ -247,14 +236,8 @@ function do_restore() {
     
     echo_info "Restaurando $BACKUP em $DB..."
     
-    # Descomprimir backup se necessário
-    if [[ "$BACKUP" =~ \.gz$ ]]; then
-        echo_info "Descomprimindo backup..."
-        gunzip -c "$BACKUP" > "$BACKUP_DIR/temp_restore.sql"
-        RESTORE_FILE="$BACKUP_DIR/temp_restore.sql"
-    else
-        RESTORE_FILE="$BACKUP"
-    fi
+    # Descomprimir backup
+    gunzip -c "$BACKUP_DIR/$BACKUP" > "$BACKUP_DIR/temp_restore.sql"
     
     # Dropar conexões existentes
     docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
@@ -262,13 +245,13 @@ function do_restore() {
     
     # Restaurar
     if docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -d "$DB" -f "/var/backups/postgres/$(basename "$RESTORE_FILE")"; then
+        psql -U "$PG_USER" -d "$DB" -f "/var/backups/postgres/temp_restore.sql"; then
         echo_success "Restauração concluída com sucesso"
         send_webhook "{
             \"status\": \"success\",
             \"action\": \"restore\",
             \"database\": \"$DB\",
-            \"file\": \"$(basename "$BACKUP")\",
+            \"file\": \"$BACKUP\",
             \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"
         }"
     else
@@ -277,13 +260,13 @@ function do_restore() {
             \"status\": \"error\",
             \"action\": \"restore\",
             \"database\": \"$DB\",
-            \"file\": \"$(basename "$BACKUP")\",
+            \"file\": \"$BACKUP\",
             \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"
         }"
     fi
     
     # Limpar arquivo temporário
-    [ -f "$BACKUP_DIR/temp_restore.sql" ] && rm -f "$BACKUP_DIR/temp_restore.sql"
+    rm -f "$BACKUP_DIR/temp_restore.sql"
 }
 
 # Script principal
@@ -294,11 +277,13 @@ function main() {
     echo_info "Iniciando processo de configuração..."
     
     if ! load_env; then
+        # Verificar Docker
         if ! command_exists docker; then
             echo_error "Docker não está instalado."
             exit 1
         fi
         
+        # Identificar containers PostgreSQL
         echo_info "Identificando containers PostgreSQL..."
         POSTGRES_CONTAINERS=$(docker ps --format "{{.Names}}" | grep -i postgres)
         
@@ -327,4 +312,115 @@ function main() {
             fi
         fi
         
-        read -p "Usar usuário padrão 'postgres'? (yes/no): " USE
+        # Configurar usuário PostgreSQL
+        read -p "Usar usuário padrão 'postgres'? (yes/no): " USE_DEFAULT_USER
+        if [[ "$USE_DEFAULT_USER" =~ ^(yes|Yes|YES)$ ]]; then
+            PG_USER="postgres"
+        else
+            read -p "Usuário PostgreSQL: " PG_USER
+            if [ -z "$PG_USER" ]; then
+                echo_error "Usuário não pode estar vazio."
+                exit 1
+            fi
+        fi
+        
+        # Senha PostgreSQL
+        read -p "Senha PostgreSQL: " PG_PASSWORD
+        if [ -z "$PG_PASSWORD" ]; then
+            echo_error "Senha não pode estar vazia."
+            exit 1
+        fi
+        
+        # Período de retenção
+        read -p "Período de retenção em dias [30]: " RETENTION_DAYS
+        RETENTION_DAYS=${RETENTION_DAYS:-30}
+        
+        # URL do Webhook
+        while true; do
+            read -p "URL do Webhook: " WEBHOOK_URL
+            if valid_url "$WEBHOOK
+            # Continuação do main()...
+            URL"; then break; fi
+            echo_error "URL inválida (use http:// ou https://)"
+        done
+        
+        # Tipo de backup
+        echo_info "Tipos de backup disponíveis:"
+        echo "1) Backup completo com inserts"
+        echo "2) Apenas estrutura"
+        echo "3) Tabelas específicas"
+        read -p "Selecione [1]: " BACKUP_OPTION
+        BACKUP_OPTION=${BACKUP_OPTION:-1}
+        
+        save_env
+    fi
+    
+    # Criar e verificar diretório de backup
+    mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
+    
+    # Verificar montagem do volume
+    if ! check_volume_mount; then
+        read -p "Continuar mesmo sem volume montado? (yes/no): " CONTINUE_WITHOUT_MOUNT
+        if [[ ! "$CONTINUE_WITHOUT_MOUNT" =~ ^(yes|Yes|YES)$ ]]; then
+            exit 1
+        fi
+    fi
+    
+    # Criar scripts
+    BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
+    RESTORE_SCRIPT="/usr/local/bin/restore_postgres.sh"
+    
+    # Script de backup
+    cat > "$BACKUP_SCRIPT" <<EOF
+#!/bin/bash
+source "$ENV_FILE"
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_log do_backup)
+
+# Iniciar log
+echo "=== Início do backup em \$(date) ===" >> "$LOG_FILE"
+rotate_log
+
+# Executar backup para cada banco
+for DB in \$(docker exec -e PGPASSWORD="\$PG_PASSWORD" "\$CONTAINER_NAME" psql -U "\$PG_USER" -tAc "SELECT datname FROM pg_database WHERE datistemplate = false;"); do
+    do_backup "\$DB"
+done
+
+echo "=== Fim do backup em \$(date) ===" >> "$LOG_FILE"
+EOF
+    chmod +x "$BACKUP_SCRIPT"
+    
+    # Script de restauração
+    cat > "$RESTORE_SCRIPT" <<EOF
+#!/bin/bash
+source "$ENV_FILE"
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_log do_restore)
+
+# Iniciar log
+echo "=== Início da restauração em \$(date) ===" >> "$LOG_FILE"
+rotate_log
+
+do_restore
+
+echo "=== Fim da restauração em \$(date) ===" >> "$LOG_FILE"
+EOF
+    chmod +x "$RESTORE_SCRIPT"
+    
+    # Configurar cron
+    (crontab -l 2>/dev/null | grep -v backup_postgres.sh; echo "0 0 * * * $BACKUP_SCRIPT >> $LOG_FILE 2>&1") | crontab -
+    
+    echo_success "Configuração concluída!"
+    echo_info "Comandos disponíveis:"
+    echo "  Backup manual: $BACKUP_SCRIPT"
+    echo "  Restauração: $RESTORE_SCRIPT"
+    
+    read -p "Executar backup agora? (yes/no): " DO_BACKUP
+    if [[ "$DO_BACKUP" =~ ^(yes|Yes|YES)$ ]]; then
+        "$BACKUP_SCRIPT"
+    fi
+    
+    echo "=== Fim da execução em $(date) ===" >> "$LOG_FILE"
+}
+
+# Executar script principal
+main "$@"
