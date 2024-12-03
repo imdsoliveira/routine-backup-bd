@@ -326,5 +326,96 @@ function main() {
                 exit 1
             fi
         fi
+
+        read -p "Período de retenção em dias [30]: " RETENTION_DAYS
+        RETENTION_DAYS=${RETENTION_DAYS:-30}
         
-        read -p "Usar usuário padrão 'postgres'? (yes/no): " USE
+        # URL do Webhook
+        while true; do
+            read -p "URL do Webhook: " WEBHOOK_URL
+            if valid_url "$WEBHOOK_URL"; then break; fi
+            echo_error "URL inválida (use http:// ou https://)"
+        done
+        
+        # Tipo de backup
+        echo_info "Tipos de backup disponíveis:"
+        echo "1) Backup completo com inserts"
+        echo "2) Apenas estrutura"
+        echo "3) Tabelas específicas"
+        read -p "Selecione [1]: " BACKUP_OPTION
+        BACKUP_OPTION=${BACKUP_OPTION:-1}
+        
+        save_env
+    fi
+    
+    # Criar e verificar diretório de backup
+    mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
+    
+    # Verificar montagem do volume
+    if ! check_volume_mount; then
+        read -p "Continuar mesmo sem volume montado? (yes/no): " CONTINUE_WITHOUT_MOUNT
+        if [[ ! "$CONTINUE_WITHOUT_MOUNT" =~ ^(yes|Yes|YES)$ ]]; then
+            exit 1
+        fi
+    fi
+    
+    # Criar scripts
+    BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
+    RESTORE_SCRIPT="/usr/local/bin/restore_postgres.sh"
+    
+    # Script de backup
+    cat > "$BACKUP_SCRIPT" <<'EOF'
+#!/bin/bash
+source "$ENV_FILE"
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_log do_backup)
+
+# Iniciar log
+echo "=== Início do backup em $(date) ===" >> "$LOG_FILE"
+rotate_log
+
+# Executar backup para cada banco
+for DB in $(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" psql -U "$PG_USER" -tAc "SELECT datname FROM pg_database WHERE datistemplate = false;"); do
+    do_backup "$DB"
+done
+
+echo "=== Fim do backup em $(date) ===" >> "$LOG_FILE"
+EOF
+
+    chmod +x "$BACKUP_SCRIPT"
+    
+    # Script de restauração
+    cat > "$RESTORE_SCRIPT" <<'EOF'
+#!/bin/bash
+source "$ENV_FILE"
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_log do_restore)
+
+# Iniciar log
+echo "=== Início da restauração em $(date) ===" >> "$LOG_FILE"
+rotate_log
+
+do_restore
+
+echo "=== Fim da restauração em $(date) ===" >> "$LOG_FILE"
+EOF
+
+    chmod +x "$RESTORE_SCRIPT"
+    
+    # Configurar cron
+    (crontab -l 2>/dev/null | grep -v backup_postgres.sh; echo "0 0 * * * $BACKUP_SCRIPT >> $LOG_FILE 2>&1") | crontab -
+    
+    echo_success "Configuração concluída!"
+    echo_info "Comandos disponíveis:"
+    echo "  Backup manual: $BACKUP_SCRIPT"
+    echo "  Restauração: $RESTORE_SCRIPT"
+    
+    read -p "Executar backup agora? (yes/no): " DO_BACKUP
+    if [[ "$DO_BACKUP" =~ ^(yes|Yes|YES)$ ]]; then
+        "$BACKUP_SCRIPT"
+    fi
+    
+    echo "=== Fim da execução em $(date) ===" >> "$LOG_FILE"
+}
+
+# Executar script principal
+main "$@"
