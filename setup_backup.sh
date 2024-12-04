@@ -119,53 +119,97 @@ function send_webhook() {
 
 # Função para carregar ou criar configurações
 function setup_config() {
+    local CONFIG_EXISTS=false
+    local TEMP_ENV_FILE="/tmp/pg_backup.env.tmp"
+
+    # Verificar configuração existente em múltiplos locais
     if [ -f "$ENV_FILE" ]; then
-        echo_info "Configurações existentes encontradas:"
-        cat "$ENV_FILE"
-        read -p "Deseja manter estas configurações? (yes/no): " keep_config
-        if [[ "$keep_config" =~ ^(yes|y|Y) ]]; then
+        CONFIG_EXISTS=true
+        cp "$ENV_FILE" "$TEMP_ENV_FILE"
+    elif [ -f "/etc/pg_backup.env" ]; then
+        CONFIG_EXISTS=true
+        cp "/etc/pg_backup.env" "$TEMP_ENV_FILE"
+        ENV_FILE="/etc/pg_backup.env"
+    elif [ -f "$HOME/.pg_backup.env" ]; then
+        CONFIG_EXISTS=true
+        cp "$HOME/.pg_backup.env" "$TEMP_ENV_FILE"
+        ENV_FILE="$HOME/.pg_backup.env"
+    fi
+
+    if [ "$CONFIG_EXISTS" = true ]; then
+        echo_info "Configurações existentes encontradas em: $ENV_FILE"
+        echo "Configurações atuais:"
+        echo "----------------------------------------"
+        grep -v "PG_PASSWORD" "$ENV_FILE" | sed 's/^/  /'
+        echo "----------------------------------------"
+        
+        read -p "Deseja atualizar alguma configuração? (yes/no): " update_config
+        if [[ "$update_config" =~ ^(yes|y|Y) ]]; then
             source "$ENV_FILE"
+            
+            echo_info "Para cada configuração, pressione Enter para manter o valor atual"
+            echo_info "ou digite um novo valor para atualizar."
+            
+            # Container
+            read -p "Container PostgreSQL [$CONTAINER_NAME]: " new_container
+            CONTAINER_NAME=${new_container:-$CONTAINER_NAME}
+            
+            # Usuário
+            read -p "Usuário PostgreSQL [$PG_USER]: " new_user
+            PG_USER=${new_user:-$PG_USER}
+            
+            # Senha (sempre pedir para maior segurança e exibir na tela)
+            read -p "Senha PostgreSQL (Enter para manter atual): " new_password
+            if [ -n "$new_password" ]; then
+                read -p "Confirme a senha: " confirm_password
+                if [ "$new_password" = "$confirm_password" ]; then
+                    PG_PASSWORD="$new_password"
+                else
+                    echo_error "As senhas não coincidem. Mantendo senha atual."
+                fi
+            fi
+            
+            # Retenção
+            read -p "Dias de retenção dos backups [$RETENTION_DAYS]: " new_retention
+            RETENTION_DAYS=${new_retention:-$RETENTION_DAYS}
+            
+            # Webhook
+            read -p "URL do Webhook [$WEBHOOK_URL]: " new_webhook
+            WEBHOOK_URL=${new_webhook:-$WEBHOOK_URL}
+        else
+            echo_info "Mantendo configurações existentes."
             return 0
         fi
-    fi
-
-    echo_info "Configurando backup..."
-
-    # Detectar container
-    CONTAINER_NAME=$(detect_postgres_container)
-
-    # Configurar usuário e senha
-    read -p "Usuário PostgreSQL [postgres]: " PG_USER
-    PG_USER=${PG_USER:-postgres}
-
-    while true; do
-        read -s -p "Senha PostgreSQL: " PG_PASSWORD
-        echo
-        read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
-        echo
-        if [ "$PG_PASSWORD" == "$PG_PASSWORD_CONFIRM" ]; then
-            break
-        else
+    else
+        echo_info "Configurando novo backup..."
+        
+        # Detectar container
+        CONTAINER_NAME=$(detect_postgres_container)
+        
+        # Usuário PostgreSQL
+        read -p "Usuário PostgreSQL [postgres]: " PG_USER
+        PG_USER=${PG_USER:-postgres}
+        
+        # Senha PostgreSQL (visível)
+        read -p "Senha PostgreSQL: " PG_PASSWORD
+        read -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+        while [ "$PG_PASSWORD" != "$PG_PASSWORD_CONFIRM" ]; do
             echo_warning "As senhas não coincidem. Tente novamente."
-        fi
-    done
-
-    # Configurar retenção
-    read -p "Dias de retenção dos backups [30]: " RETENTION_DAYS
-    RETENTION_DAYS=${RETENTION_DAYS:-30}
-
-    # Configurar webhook
-    read -p "URL do Webhook: " WEBHOOK_URL
-    if ! curl -s -o /dev/null "$WEBHOOK_URL"; then
-        echo_warning "Não foi possível validar o webhook. Continuar mesmo assim? (yes/no): "
-        read confirm
-        if [[ ! "$confirm" =~ ^(yes|y|Y) ]]; then
-            exit 1
-        fi
+            read -p "Senha PostgreSQL: " PG_PASSWORD
+            read -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+        done
+        
+        # Retenção
+        read -p "Dias de retenção dos backups [30]: " RETENTION_DAYS
+        RETENTION_DAYS=${RETENTION_DAYS:-30}
+        
+        # Webhook
+        read -p "URL do Webhook: " WEBHOOK_URL
     fi
 
-    # Salvar configurações
-    cat > "$ENV_FILE" <<EOF
+    # Salvar configurações em múltiplos locais com redundância
+    local CONFIG_CONTENT
+    CONFIG_CONTENT=$(cat <<EOF
 CONTAINER_NAME="$CONTAINER_NAME"
 PG_USER="$PG_USER"
 PG_PASSWORD="$PG_PASSWORD"
@@ -175,8 +219,48 @@ BACKUP_DIR="$BACKUP_DIR"
 LOG_FILE="$LOG_FILE"
 TEMP_DIR="$TEMP_DIR"
 EOF
+    )
+
+    # Salvar em múltiplos locais com permissões apropriadas
+    echo "$CONFIG_CONTENT" > "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-    echo_success "Configurações salvas em $ENV_FILE"
+    
+    # Backup em /etc
+    if [ -w /etc ]; then
+        echo "$CONFIG_CONTENT" > "/etc/pg_backup.env"
+        chmod 600 "/etc/pg_backup.env"
+    fi
+    
+    # Backup no home do usuário
+    echo "$CONFIG_CONTENT" > "$HOME/.pg_backup.env"
+    chmod 600 "$HOME/.pg_backup.env"
+    
+    echo_success "Configurações salvas com redundância em:"
+    echo "  - $ENV_FILE"
+    [ -f "/etc/pg_backup.env" ] && echo "  - /etc/pg_backup.env"
+    echo "  - $HOME/.pg_backup.env"
+
+    # Limpar arquivo temporário
+    [ -f "$TEMP_ENV_FILE" ] && rm -f "$TEMP_ENV_FILE"
+}
+
+# Nova Função: Verificar e Atualizar Container PostgreSQL
+function verify_container() {
+    local current_container="$1"
+    
+    # Verificar se o container atual ainda existe e está rodando
+    if ! docker ps --format "{{.Names}}" | grep -qw "^${current_container}$"; then
+        echo_warning "Container '$current_container' não encontrado ou não está rodando."
+        echo_info "Detectando container PostgreSQL..."
+        local new_container
+        new_container=$(detect_postgres_container)
+        
+        if [ "$new_container" != "$current_container" ]; then
+            echo_info "Atualizando container para: $new_container"
+            sed -i "s/CONTAINER_NAME=\".*\"/CONTAINER_NAME=\"$new_container\"/" "$ENV_FILE"
+            CONTAINER_NAME="$new_container"
+        fi
+    fi
 }
 
 # Função para garantir que o banco de dados exista
@@ -498,13 +582,16 @@ function do_restore() {
 
     echo_info "Restaurando backup '$BACKUP' em '$DB'..."
 
+    # Verificar e atualizar container se necessário
+    verify_container "$CONTAINER_NAME"
+
     # Criar banco se não existir
     echo_info "Verificando banco de dados '$DB'..."
     if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
         psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$DB"; then
         echo_info "Criando banco de dados '$DB'..."
         if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-            psql -U "$PG_USER" -c "CREATE DATABASE \"$DB\";" 2>>"$LOG_FILE"; then
+            psql -U "$PG_USER" -c "CREATE DATABASE \"$DB\" WITH TEMPLATE template0;" 2>>"$LOG_FILE"; then
             echo_error "Falha ao criar banco de dados '$DB'"
             return 1
         fi
@@ -521,6 +608,11 @@ function do_restore() {
     # Descomprimir backup
     echo_info "Descomprimindo backup..."
     gunzip -c "$BACKUP" > "$BACKUP_DIR/temp_restore.sql"
+
+    # Corrigir sintaxe SQL
+    echo_info "Corrigindo sintaxe SQL..."
+    sed -i 's/CREATE TABLE \([^(]*\)(/CREATE TABLE \1 ();/g' "$BACKUP_DIR/temp_restore.sql"
+    sed -i 's/^);$/ALTER TABLE/g' "$BACKUP_DIR/temp_restore.sql"
 
     # Criar arquivos temporários para progresso
     local progress_file="$TEMP_DIR/progress"
@@ -588,33 +680,21 @@ function do_restore() {
     fi
 }
 
-# Função para limpar instalação anterior
-function cleanup_old_installation() {
-    echo_info "Removendo instalação anterior..."
-    rm -f /usr/local/bin/pg_backup
-    rm -f /usr/local/bin/pg_restore_db
-    rm -f "$ENV_FILE"
-    echo_success "Limpeza concluída"
-}
-
 # Função principal
 function main() {
     case "${1:-}" in
-        "--backup")
+        "--backup"|"--restore")
             if [ ! -f "$ENV_FILE" ]; then
                 echo_error "Arquivo de configuração '$ENV_FILE' não encontrado. Execute o script sem argumentos para configurar."
                 exit 1
             fi
             source "$ENV_FILE"
-            do_backup
-            ;;
-        "--restore")
-            if [ ! -f "$ENV_FILE" ]; then
-                echo_error "Arquivo de configuração '$ENV_FILE' não encontrado. Execute o script sem argumentos para configurar."
-                exit 1
+            verify_container "$CONTAINER_NAME"
+            if [ "${1:-}" = "--backup" ]; then
+                do_backup
+            else
+                do_restore
             fi
-            source "$ENV_FILE"
-            do_restore
             ;;
         "--clean")
             cleanup_old_installation
