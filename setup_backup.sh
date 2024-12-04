@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 1.4.1
+# Versão: 1.4.2
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
@@ -13,6 +13,7 @@
 # - Gerenciamento de logs com rotação
 # - Recriação automática de estruturas ausentes
 # - Verificação pré-backup para garantir a existência do banco de dados
+# - Correção na ordem das operações durante a restauração
 # =============================================================================
 
 set -e
