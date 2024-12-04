@@ -139,9 +139,9 @@ function setup_config() {
     PG_USER=${PG_USER:-postgres}
 
     while true; do
-        read -s -p "Senha PostgreSQL: " PG_PASSWORD
+        read -p "Senha PostgreSQL: " PG_PASSWORD
         echo
-        read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+        read -p "Confirme a senha: " PG_PASSWORD_CONFIRM
         echo
         if [ "$PG_PASSWORD" == "$PG_PASSWORD_CONFIRM" ]; then
             break
@@ -586,15 +586,6 @@ function do_restore() {
             \"status\": \"ERROR\"
         }"
     fi
-}
-
-# Função para limpar instalação anterior
-function cleanup_old_installation() {
-    echo_info "Removendo instalação anterior..."
-    rm -f /usr/local/bin/pg_backup
-    rm -f /usr/local/bin/pg_restore_db
-    rm -f "$ENV_FILE"
-    echo_success "Limpeza concluída"
 }
 
 # Função principal
