@@ -280,7 +280,7 @@ function send_webhook() {
     done
 
     echo_error "Falha ao enviar webhook após $max_retries tentativas"
-    echo "$payload" >> /var/backups/postgres/failed_webhooks.log
+    echo "$payload" >> "$BACKUP_DIR/failed_webhooks.log"
     return 1
 }
 
@@ -429,7 +429,6 @@ EOF_JSON
 done
 
 echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Fim do processo de backup" >> "$LOG_FILE"
-
 EOF
 
     sudo chmod +x "$BACKUP_SCRIPT"
@@ -498,7 +497,7 @@ function send_webhook() {
     done
 
     echo_error "Falha ao enviar webhook após $max_retries tentativas"
-    echo "$payload" >> /var/backups/postgres/failed_webhooks.log
+    echo "$payload" >> "$BACKUP_DIR/failed_webhooks.log"
     return 1
 }
 
