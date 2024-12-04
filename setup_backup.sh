@@ -603,7 +603,8 @@ do_restore() {
         local file_size
         file_size=$(du -h "${BACKUPS[$i]}" | cut -f1)
         local file_date
-        file_date=$(stat -c %y "${BACKUPS[$i]}" | cut -d. -f1)
+        # Atualização 1: Usar `date -r` para formatar a data conforme solicitado
+        file_date=$(date -r "${BACKUPS[$i]}" '+%d/%m/%Y %H:%M:%S')
         echo "$((i+1))) $(basename "${BACKUPS[$i]}") (Tamanho: $file_size, Data: $file_date)"
     done
 
@@ -620,7 +621,7 @@ do_restore() {
         echo_warning "Seleção inválida. Tente novamente."
     done
 
-    # Extrair nome do banco
+    # Atualização 2: Extrair nome do banco corretamente usando sed conforme o padrão
     local DB_NAME=$(basename "$BACKUP" | sed -E 's/postgres_backup_[0-9]+_(.*)\.sql\.gz/\1/')
 
     echo_warning "ATENÇÃO: Isso irá substituir o banco '$DB_NAME' existente!"
