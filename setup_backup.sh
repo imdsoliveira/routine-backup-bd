@@ -116,9 +116,9 @@ function setup_config() {
     read -p "Usuário PostgreSQL [postgres]: " PG_USER
     PG_USER=${PG_USER:-postgres}
     while true; do
-        read -s -p "Senha PostgreSQL: " PG_PASSWORD
+        read -p "Senha PostgreSQL: " PG_PASSWORD
         echo
-        read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+        read -p "Confirme a senha: " PG_PASSWORD_CONFIRM
         echo
         if [ "$PG_PASSWORD" == "$PG_PASSWORD_CONFIRM" ]; then
             break
