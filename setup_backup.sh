@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 1.4.5
+# Versão: 1.5.0
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
@@ -14,6 +14,8 @@
 # - Recriação automática de estruturas ausentes
 # - Verificação pré-backup
 # - Correção na ordem das operações
+# - Atualização flexível de configurações
+# - Opções após configuração: backup, restauração ou sair
 # =============================================================================
 
 set -e
@@ -63,7 +65,7 @@ declare -A BACKUP_SIZES
 declare -A BACKUP_FILES
 declare -A DELETED_BACKUPS
 
-# Função para gerenciar rotação de logs
+# Rotação de logs
 rotate_logs() {
     if [ -f "$LOG_FILE" ]; then
         local log_size
@@ -145,48 +147,51 @@ setup_config() {
         echo_info "Configurações existentes encontradas em: $ENV_FILE"
         echo "Configurações atuais:"
         echo "----------------------------------------"
-        grep -v "PG_PASSWORD" "$ENV_FILE" | sed 's/^/  /'
+        grep -v "PG_PASSWORD" "$ENV_FILE" | sed 's/^/  /' | tee /dev/stderr
+        grep "PG_PASSWORD" "$ENV_FILE" | sed 's/^/  /' | tee /dev/stderr
         echo "----------------------------------------"
         
-        read -p "Deseja atualizar alguma configuração? (yes/no): " update_config
-        if [[ "$update_config" =~ ^(yes|y|Y) ]]; then
-            source "$ENV_FILE"
-            
-            echo_info "Para cada configuração, pressione Enter para manter o valor atual"
-            echo_info "ou digite um novo valor para atualizar."
-            
-            # Container
-            read -p "Container PostgreSQL [$CONTAINER_NAME]: " new_container
-            CONTAINER_NAME=${new_container:-$CONTAINER_NAME}
-            
-            # Usuário
-            read -p "Usuário PostgreSQL [$PG_USER]: " new_user
-            PG_USER=${new_user:-$PG_USER}
-            
-            # Senha (pedir sempre para maior segurança)
-            read -s -p "Senha PostgreSQL (Pressione Enter para manter a atual): " new_password
-            echo
-            if [ -n "$new_password" ]; then
-                read -s -p "Confirme a senha: " confirm_password
-                echo
-                if [ "$new_password" = "$confirm_password" ]; then
-                    PG_PASSWORD="$new_password"
-                else
-                    echo_error "As senhas não coincidem. Mantendo senha atual."
-                fi
-            fi
-            
-            # Retenção
-            read -p "Dias de retenção dos backups [$RETENTION_DAYS]: " new_retention
-            RETENTION_DAYS=${new_retention:-$RETENTION_DAYS}
-            
-            # Webhook
-            read -p "URL do Webhook [$WEBHOOK_URL]: " new_webhook
-            WEBHOOK_URL=${new_webhook:-$WEBHOOK_URL}
-        else
-            echo_info "Mantendo configurações existentes."
-            return 0
-        fi
+        while true; do
+            read -p "Digite o nome da configuração que deseja atualizar (ou pressione Enter para continuar): " config_name
+            case "$config_name" in
+                "CONTAINER_NAME")
+                    read -p "Container PostgreSQL [$CONTAINER_NAME]: " new_container
+                    CONTAINER_NAME=${new_container:-$CONTAINER_NAME}
+                    ;;
+                "PG_USER")
+                    read -p "Usuário PostgreSQL [$PG_USER]: " new_user
+                    PG_USER=${new_user:-$PG_USER}
+                    ;;
+                "PG_PASSWORD")
+                    read -s -p "Senha PostgreSQL: " new_password
+                    echo
+                    if [ -n "$new_password" ]; then
+                        read -s -p "Confirme a senha: " confirm_password
+                        echo
+                        if [ "$new_password" = "$confirm_password" ]; then
+                            PG_PASSWORD="$new_password"
+                        else
+                            echo_error "As senhas não coincidem. Mantendo senha atual."
+                        fi
+                    fi
+                    ;;
+                "RETENTION_DAYS")
+                    read -p "Dias de retenção dos backups [$RETENTION_DAYS]: " new_retention
+                    RETENTION_DAYS=${new_retention:-$RETENTION_DAYS}
+                    ;;
+                "WEBHOOK_URL")
+                    read -p "URL do Webhook [$WEBHOOK_URL]: " new_webhook
+                    WEBHOOK_URL=${new_webhook:-$WEBHOOK_URL}
+                    ;;
+                "")
+                    break
+                    ;;
+                *)
+                    echo_warning "Configuração '$config_name' inválida. Tente novamente."
+                    ;;
+            esac
+        done
+
     else
         echo_info "Configurando novo backup..."
         
@@ -229,23 +234,23 @@ setup_config() {
     local CONFIG_CONTENT
     CONFIG_CONTENT=$(cat <<EOF
 CONTAINER_NAME="$CONTAINER_NAME"
-PG_USER="$PG_USER"
+PG_USER="$PG_USER" 
 PG_PASSWORD="$PG_PASSWORD"
 RETENTION_DAYS="$RETENTION_DAYS"
 WEBHOOK_URL="$WEBHOOK_URL"
-BACKUP_DIR="$BACKUP_DIR"
+BACKUP_DIR="$BACKUP_DIR" 
 LOG_FILE="$LOG_FILE"
 TEMP_DIR="$TEMP_DIR"
 EOF
     )
 
-    # Salvar em múltiplos locais com permissões apropriadas
+    # Salvar em múltiplos locais com permissões apropriadas  
     echo "$CONFIG_CONTENT" > "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     
     # Backup em /etc
     if [ -w /etc ]; then
-        echo "$CONFIG_CONTENT" > "/etc/pg_backup.env"
+        echo "$CONFIG_CONTENT" > "/etc/pg_backup.env"  
         chmod 600 "/etc/pg_backup.env"
     fi
     
@@ -253,6 +258,12 @@ EOF
     echo "$CONFIG_CONTENT" > "$HOME/.pg_backup.env"
     chmod 600 "$HOME/.pg_backup.env"
     
+    echo "Configurações salvas:"
+    echo "----------------------------------------"
+    grep -v "PG_PASSWORD" <<< "$CONFIG_CONTENT" | sed 's/^/  /' | tee /dev/stderr  
+    grep "PG_PASSWORD" <<< "$CONFIG_CONTENT" | sed 's/^/  /' | tee /dev/stderr
+    echo "----------------------------------------"
+
     echo_success "Configurações salvas com redundância em:"
     echo "  - $ENV_FILE"
     [ -f "/etc/pg_backup.env" ] && echo "  - /etc/pg_backup.env"
@@ -503,9 +514,10 @@ cleanup_old_installation() {
 do_backup() {
     rotate_logs
     verify_container "$CONTAINER_NAME"
-    
+
     echo_info "Iniciando backup completo..."
-    
+    local TIMESTAMP=$(date +%Y%m%d%H%M%S)
+
     # Lista todos os bancos
     local databases
     databases=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
@@ -526,7 +538,7 @@ do_backup() {
             gzip -f "$BACKUP_PATH"
             BACKUP_PATH="${BACKUP_PATH}.gz"
 
-            local BACKUP_SIZE=$(ls -lh "$BACKUP_PATH" | awk '{print $5}')
+            local BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
             echo_success "Backup concluído: $(basename "$BACKUP_PATH") (Tamanho: $BACKUP_SIZE)"
 
             # Armazenar resultados para webhook consolidado
@@ -589,9 +601,9 @@ do_restore() {
     echo "Backups disponíveis:"
     for i in "${!BACKUPS[@]}"; do
         local file_size
-        file_size=$(ls -lh "${BACKUPS[$i]}" | awk '{print $5}')
+        file_size=$(du -h "${BACKUPS[$i]}" | cut -f1)
         local file_date
-        file_date=$(ls -l --time-style=long-iso "${BACKUPS[$i]}" | awk '{print $6, $7}')
+        file_date=$(stat -c %y "${BACKUPS[$i]}" | cut -d. -f1)
         echo "$((i+1))) $(basename "${BACKUPS[$i]}") (Tamanho: $file_size, Data: $file_date)"
     done
 
@@ -697,6 +709,116 @@ do_restore() {
     rm -rf "$TEMP_DIR"/*
 }
 
+# Função para criar links simbólicos
+create_symlinks() {
+    echo_info "Criando links simbólicos..."
+    ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" "$SCRIPT_DIR/pg_backup"
+    ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" "$SCRIPT_DIR/pg_restore_db"
+
+    # Verificar se os links foram criados
+    if [ ! -L "$SCRIPT_DIR/pg_backup" ] || [ ! -L "$SCRIPT_DIR/pg_restore_db" ]; then
+        echo_error "Falha ao criar links simbólicos."
+        exit 1
+    fi
+
+    echo_success "Links simbólicos criados com sucesso:"
+    echo "  - pg_backup      -> $SCRIPT_DIR/pg_backup_manager.sh"
+    echo "  - pg_restore_db  -> $SCRIPT_DIR/pg_backup_manager.sh"
+}
+
+# Função para configurar cron job
+configure_cron() {
+    echo_info "Configurando cron job para backup diário às 00:00..."
+
+    # Verificar se o cron job já existe
+    if ! crontab -l 2>/dev/null | grep -q "/usr/local/bin/pg_backup"; then
+        (crontab -l 2>/dev/null; echo "0 0 * * * /usr/local/bin/pg_backup") | crontab -
+        echo_success "Cron job configurado com sucesso."
+    else
+        echo_info "Cron job já está configurado."
+    fi
+}
+
+# Função para instalar o script principal
+install_script() {
+    echo_info "Instalando PostgreSQL Backup Manager..."
+
+    # Copiar o script para o diretório de instalação
+    cp "$0" "$SCRIPT_DIR/pg_backup_manager.sh"
+    chmod +x "$SCRIPT_DIR/pg_backup_manager.sh"
+    echo_success "Script principal instalado em $SCRIPT_DIR/pg_backup_manager.sh"
+
+    # Criar links simbólicos
+    create_symlinks
+
+    # Configurar cron job
+    configure_cron
+
+    echo_success "Instalação concluída com sucesso!"
+}
+
+# Função para atualizar o script principal
+update_script() {
+    echo_info "Atualizando script principal..."
+
+    # Baixar a versão mais recente do script
+    local latest_script_url="https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/pg_backup_manager.sh"
+    if curl -sSL "$latest_script_url" -o "$SCRIPT_DIR/pg_backup_manager.sh"; then
+        chmod +x "$SCRIPT_DIR/pg_backup_manager.sh"
+        echo_success "Script principal atualizado com sucesso."
+    else
+        echo_error "Falha ao atualizar o script principal. Verifique sua conexão com a internet."
+        exit 1
+    fi
+
+    # Atualizar links simbólicos (já estão apontando para o script principal)
+    echo_info "Atualização dos links simbólicos, se necessário..."
+    create_symlinks
+
+    echo_success "Atualização concluída com sucesso!"
+}
+
+# Função para executar a configuração inicial do script principal
+execute_initial_config() {
+    echo_info "Executando a configuração inicial do PostgreSQL Backup Manager..."
+    bash "$SCRIPT_DIR/pg_backup_manager.sh" --configure
+    echo_success "Configuração inicial concluída."
+}
+
+# Função para configurar ou atualizar configurações
+configure_or_update() {
+    setup_config
+}
+
+# Função para configurar opções após configuração
+post_configuration_options() {
+    echo_info "Opções disponíveis:"
+    echo "  1) Executar um backup agora"
+    echo "  2) Executar uma restauração agora"
+    echo "  3) Atualizar configurações"
+    echo "  4) Sair"
+    read -p "Digite o número da opção desejada: " option
+    case "$option" in
+        1)
+            do_backup
+            ;;
+        2)
+            do_restore
+            ;;
+        3)
+            configure_or_update
+            ;;
+        4)
+            echo_info "Saindo."
+            exit 0
+            ;;
+        *)
+            echo_warning "Opção inválida. Saindo."
+            exit 1
+            ;;
+    esac
+}
+
 # Função principal
 main() {
     case "${1:-}" in
@@ -716,47 +838,44 @@ main() {
         "--clean")
             cleanup_old_installation
             ;;
+        "--install")
+            install_script
+            ;;
+        "--update")
+            update_script
+            ;;
+        "--configure")
+            configure_or_update
+            ;;
         *)
             # Verificar se está sendo executado via link simbólico
             local script_name
             script_name=$(basename "$0")
             case "$script_name" in
                 pg_backup)
-                    action="--backup"
+                    main "--backup"
                     ;;
                 pg_restore_db)
-                    action="--restore"
+                    main "--restore"
                     ;;
                 *)
-                    action=""
+                    # Se não for via link, executar configuração inicial
+                    echo_info "Iniciando configuração do PostgreSQL Backup Manager..."
+                    
+                    # Instalar o script se não estiver instalado
+                    if [ ! -f "$SCRIPT_DIR/pg_backup_manager.sh" ]; then
+                        install_script
+                    fi
+
+                    # Carregar configurações
+                    source "$ENV_FILE"
+                    verify_container "$CONTAINER_NAME"
+
+                    echo_success "Configuração concluída com sucesso!"
+                    post_configuration_options
                     ;;
             esac
-
-            if [ -n "$action" ]; then
-                # Executar backup ou restore diretamente
-                main "$action"
-                exit 0
-            fi
-
-            # Configuração inicial
-            setup_config
-
-            # Configurar container após atualização
-            source "$ENV_FILE"
-            verify_container "$CONTAINER_NAME"
-
-            echo_success "Configuração concluída com sucesso!"
-            echo_info "Comandos disponíveis:"
-            echo "  - pg_backup         : Executar backup manualmente."
-            echo "  - pg_restore_db     : Executar restauração manualmente."
-            echo "  - pg_backup_manager.sh --clean : Limpar instalação anterior."
-
-            # Solicitar execução imediata do backup, se desejado
-            read -p "Deseja executar um backup agora? (yes/no): " do_backup_now
-            if [[ "$do_backup_now" =~ ^(yes|y|Y) ]]; then
-                do_backup
-            fi
-            ;;
+            ;;  
     esac
 }
 
