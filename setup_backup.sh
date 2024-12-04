@@ -22,12 +22,12 @@ set -u
 set -o pipefail
 
 # Configurações Globais
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly ENV_FILE="/root/.pg_backup.env"
-readonly LOG_FILE="/var/log/pg_backup.log"
-readonly MAX_LOG_SIZE=$((50 * 1024 * 1024)) # 50MB
-readonly BACKUP_DIR="/var/backups/postgres"
-readonly TEMP_DIR="$BACKUP_DIR/temp"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="/root/.pg_backup.env"
+LOG_FILE="/var/log/pg_backup.log"
+MAX_LOG_SIZE=$((50 * 1024 * 1024)) # 50MB
+BACKUP_DIR="/var/backups/postgres"
+TEMP_DIR="$BACKUP_DIR/temp"
 
 # Criar diretórios necessários
 mkdir -p "$(dirname "$LOG_FILE")" "$BACKUP_DIR" "$TEMP_DIR" || true
@@ -244,7 +244,7 @@ EOF
     [ -f "$TEMP_ENV_FILE" ] && rm -f "$TEMP_ENV_FILE"
 }
 
-# Nova Função: Verificar e Atualizar Container PostgreSQL
+# Função para verificar e atualizar container PostgreSQL
 function verify_container() {
     local current_container="$1"
     
@@ -488,7 +488,7 @@ function do_backup() {
 
     # Lista todos os bancos
     databases=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false;")
+        psql -U "$PG_USER" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false;" | tr -d ' \t\n')
 
     for db in $databases; do
         ensure_backup_possible "$db" || continue
@@ -681,6 +681,16 @@ function do_restore() {
     fi
 }
 
+# Função para limpar instalação anterior
+function cleanup_old_installation() {
+    echo_info "Removendo instalação anterior..."
+    rm -f /usr/local/bin/pg_backup_manager.sh
+    rm -f /usr/local/bin/pg_backup
+    rm -f /usr/local/bin/pg_restore_db
+    rm -f "$ENV_FILE"
+    echo_success "Limpeza concluída"
+}
+
 # Função principal
 function main() {
     case "${1:-}" in
@@ -728,28 +738,9 @@ function main() {
             # Configuração inicial
             setup_config
 
-            # Criar links simbólicos
-            echo_info "Configurando links simbólicos para facilitar o uso..."
+            # Criar links simbólicos (já feitos no script de instalação)
 
-            # Verificar se os links já existem e remover se necessário
-            if [ -L /usr/local/bin/pg_backup ] || [ -f /usr/local/bin/pg_backup ]; then
-                rm -f /usr/local/bin/pg_backup
-            fi
-
-            if [ -L /usr/local/bin/pg_restore_db ] || [ -f /usr/local/bin/pg_restore_db ]; then
-                rm -f /usr/local/bin/pg_restore_db
-            fi
-
-            # Criar os links simbólicos
-            ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" /usr/local/bin/pg_backup
-            ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" /usr/local/bin/pg_restore_db
-
-            echo_success "Links simbólicos criados com sucesso:"
-            echo "  - pg_backup -> /usr/local/bin/pg_backup_manager.sh"
-            echo "  - pg_restore_db -> /usr/local/bin/pg_backup_manager.sh"
-
-            # Configurar cron para backup diário às 00:00
-            (crontab -l 2>/dev/null | grep -v 'pg_backup'; echo "0 0 * * * /usr/local/bin/pg_backup") | crontab -
+            # Configurar cron para backup diário às 00:00 (já feito no script de instalação)
 
             echo_success "Configuração concluída com sucesso!"
             echo_info "Comandos disponíveis:"
