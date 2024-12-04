@@ -2,19 +2,17 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 1.4.4
+# Versão: 1.4.0
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
 # - Notificações webhook consolidadas
-# - Restauração interativa com barra de progresso
+# - Restauração interativa
 # - Detecção automática de container PostgreSQL
-# - Criação automática de estruturas (sequências, tabelas e índices)
+# - Criação automática de estruturas
 # - Gerenciamento de logs com rotação
 # - Recriação automática de estruturas ausentes
 # - Verificação pré-backup para garantir a existência do banco de dados
-# - Correção na ordem das operações durante a restauração
-# - Função de limpeza para remover instalações anteriores
 # =============================================================================
 
 set -e
@@ -43,19 +41,19 @@ declare -A DELETED_BACKUPS
 
 # Funções de Utilidade
 function echo_info() {
-    echo -e "\e[34m[INFO]\e[0m $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "\e[34m[INFO]\e[0m $1"
+    echo -e "\e[34m[INFO]\e[0m $1" | tee -a "$LOG_FILE" 2>/dev/null || echo -e "\e[34m[INFO]\e[0m $1"
 }
 
 function echo_success() {
-    echo -e "\e[32m[SUCCESS]\e[0m $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "\e[32m[SUCCESS]\e[0m $1"
+    echo -e "\e[32m[SUCCESS]\e[0m $1" | tee -a "$LOG_FILE" 2>/dev/null || echo -e "\e[32m[SUCCESS]\e[0m $1"
 }
 
 function echo_warning() {
-    echo -e "\e[33m[WARNING]\e[0m $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "\e[33m[WARNING]\e[0m $1"
+    echo -e "\e[33m[WARNING]\e[0m $1" | tee -a "$LOG_FILE" 2>/dev/null || echo -e "\e[33m[WARNING]\e[0m $1"
 }
 
 function echo_error() {
-    echo -e "\e[31m[ERROR]\e[0m $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "\e[31m[ERROR]\e[0m $1"
+    echo -e "\e[31m[ERROR]\e[0m $1" | tee -a "$LOG_FILE" 2>/dev/null || echo -e "\e[31m[ERROR]\e[0m $1"
 }
 
 # Função para gerenciar rotação de logs
@@ -139,9 +137,9 @@ function setup_config() {
     PG_USER=${PG_USER:-postgres}
 
     while true; do
-        read -p "Senha PostgreSQL: " PG_PASSWORD
+        read -s -p "Senha PostgreSQL: " PG_PASSWORD
         echo
-        read -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+        read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
         echo
         if [ "$PG_PASSWORD" == "$PG_PASSWORD_CONFIRM" ]; then
             break
@@ -268,59 +266,6 @@ function analyze_and_recreate_structures() {
     rm -f "$SEQUENCES_FILE" "$TABLES_FILE" "$INDEXES_FILE"
 }
 
-# Função para mostrar barra de progresso com operação atual
-function show_progress() {
-    local current=$1
-    local total=$2
-    local operation="$3"
-    local width=50
-    local percentage=$((current * 100 / total))
-    local filled=$((width * current / total))
-    local empty=$((width - filled))
-
-    printf "\r\033[K" # Limpar linha atual
-    printf "Progresso: ["
-    printf "%${filled}s" '' | tr ' ' '#'
-    printf "%${empty}s" '' | tr ' ' '-'
-    printf "] %3d%%" "$percentage"
-    if [ -n "$operation" ]; then
-        printf " %s" "$operation"
-    fi
-}
-
-# Função para preparar arquivo SQL com rastreamento de progresso
-function prepare_sql_with_progress() {
-    local input_file="$1"
-    local output_file="$2"
-    local progress_file="$3"
-    local operation_file="$4"
-
-    awk -v progress_file="$progress_file" -v operation_file="$operation_file" '
-    /^(SET|CREATE|ALTER|COPY|INSERT)/ {
-        # Extrair descrição da operação
-        operation = $0
-        if ($1 == "COPY") {
-            operation = "Copiando dados para tabela " $2
-        } else if ($1 == "CREATE" && $2 == "TABLE") {
-            operation = "Criando tabela " $3
-        } else if ($1 == "CREATE" && $2 == "INDEX") {
-            operation = "Criando índice " $3
-        } else if ($1 == "ALTER" && $2 == "TABLE") {
-            operation = "Alterando tabela " $3
-        }
-        
-        # Escapar possíveis aspas na operação
-        gsub(/"/, "\\\"", operation)
-        
-        print $0;
-        print "\\! (echo $(($(cat \"" progress_file "\")) + 1) > \"" progress_file "\"; echo \"" operation "\" > \"" operation_file "\");"
-    }
-    !/^(SET|CREATE|ALTER|COPY|INSERT)/ {
-        print $0;
-    }
-    ' "$input_file" > "$output_file"
-}
-
 # Função para enviar webhook consolidado
 function send_consolidated_webhook() {
     local success_count=0
@@ -384,15 +329,6 @@ function send_consolidated_webhook() {
     send_webhook "$payload"
 }
 
-# Função para limpar instalação anterior
-function cleanup_old_installation() {
-    echo_info "Removendo instalação anterior..."
-    rm -f /usr/local/bin/pg_backup
-    rm -f /usr/local/bin/pg_restore_db
-    rm -f "$ENV_FILE"
-    echo_success "Limpeza concluída"
-}
-
 # Função principal de backup
 function do_backup() {
     rotate_logs
@@ -420,7 +356,7 @@ function do_backup() {
             gzip -f "$BACKUP_PATH"
             BACKUP_PATH="${BACKUP_PATH}.gz"
 
-            local BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
+            local BACKUP_SIZE=$(ls -lh "$BACKUP_PATH" | awk '{print $5}')
             echo_success "Backup concluído: $(basename "$BACKUP_PATH") (Tamanho: $BACKUP_SIZE)"
 
             # Armazenar resultados para webhook consolidado
@@ -453,121 +389,75 @@ function do_backup() {
 # Função principal de restauração
 function do_restore() {
     rotate_logs
+    echo_info "Bancos de dados disponíveis:"
+    local DATABASES
+    DATABASES=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+        psql -U "$PG_USER" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false;")
 
-    # Primeiro selecionar o backup
-    echo_info "Backups disponíveis:"
-    mapfile -t BACKUPS < <(find "$BACKUP_DIR" -type f -name "postgres_backup_*.sql.gz" -print | sort -r)
-
-    if [ ${#BACKUPS[@]} -eq 0 ]; then
-        echo_error "Nenhum backup encontrado"
-        return 1
-    fi
-
-    # Mostrar backups disponíveis
-    for i in "${!BACKUPS[@]}"; do
-        local file_size
-        file_size=$(du -h "${BACKUPS[$i]}" | cut -f1)
-        local file_date
-        file_date=$(stat -c %y "${BACKUPS[$i]}" | cut -d. -f1)
-        echo "$((i+1))) $(basename "${BACKUPS[$i]}") (Tamanho: $file_size, Data: $file_date)"
-    done
-
-    # Selecionar backup
-    while true; do
-        read -p "Digite o número do backup (ou 0 para cancelar): " selection
-        if [ "$selection" = "0" ]; then
-            echo_info "Restauração cancelada."
+    select DB in $DATABASES "Cancelar"; do
+        if [ "$DB" = "Cancelar" ]; then
+            echo_info "Restauração cancelada pelo usuário."
             return 0
-        elif [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -le "${#BACKUPS[@]}" ]; then
-            BACKUP="${BACKUPS[$((selection-1))]}"
+        elif [ -n "$DB" ]; then
             break
         fi
         echo_warning "Seleção inválida."
     done
 
-    # Extrair nome do banco do arquivo de backup
-    local DB
-    DB=$(basename "$BACKUP" | sed -E 's/postgres_backup_[0-9]+_(.*)\.sql\.gz/\1/')
+    echo_info "Backups disponíveis para '$DB':"
+    mapfile -t BACKUPS < <(find "$BACKUP_DIR" -type f -name "postgres_backup_*_${DB}.sql.gz" -print | sort -r)
+
+    if [ ${#BACKUPS[@]} -eq 0 ]; then
+        echo_error "Nenhum backup encontrado para $DB"
+        return 1
+    fi
+
+    echo "Backups disponíveis:"
+    for i in "${!BACKUPS[@]}"; do
+        local file_size
+        file_size=$(ls -lh "${BACKUPS[$i]}" | awk '{print $5}')
+        local file_date
+        file_date=$(ls -l --time-style=long-iso "${BACKUPS[$i]}" | awk '{print $6, $7}')
+        echo "$((i+1))) $(basename "${BACKUPS[$i]}") (Tamanho: $file_size, Data: $file_date)"
+    done
+
+    while true; do
+        read -p "Digite o número do backup (ou 0 para cancelar): " selection
+        if [ "$selection" = "0" ]; then
+            echo_info "Restauração cancelada pelo usuário."
+            return 0
+        elif [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -le "${#BACKUPS[@]}" ]; then
+            BACKUP="${BACKUPS[$((selection-1))]}"
+            break
+        fi
+        echo_warning "Seleção inválida. Tente novamente."
+    done
 
     echo_warning "ATENÇÃO: Isso irá substituir o banco '$DB' existente!"
     read -p "Digite 'sim' para confirmar: " CONFIRM
     if [ "$CONFIRM" != "sim" ]; then
-        echo_info "Restauração cancelada."
+        echo_info "Restauração cancelada pelo usuário."
         return 0
     fi
 
     echo_info "Restaurando backup '$BACKUP' em '$DB'..."
 
-    # Criar banco se não existir
-    echo_info "Verificando banco de dados '$DB'..."
-    if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$DB"; then
-        echo_info "Criando banco de dados '$DB'..."
-        if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-            psql -U "$PG_USER" -c "CREATE DATABASE \"$DB\";" 2>>"$LOG_FILE"; then
-            echo_error "Falha ao criar banco de dados '$DB'"
-            return 1
-        fi
-        echo_success "Banco de dados criado com sucesso"
-    fi
-
-    # Verificar se o banco foi criado
-    if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$DB"; then
-        echo_error "Não foi possível criar o banco de dados '$DB'"
-        return 1
-    fi
+    # Garantir que o banco exista
+    create_database_if_not_exists "$DB"
 
     # Descomprimir backup
-    echo_info "Descomprimindo backup..."
     gunzip -c "$BACKUP" > "$BACKUP_DIR/temp_restore.sql"
 
-    # Criar arquivos temporários para progresso
-    local progress_file="$TEMP_DIR/progress"
-    local operation_file="$TEMP_DIR/operation"
-    echo "0" > "$progress_file"
-    echo "" > "$operation_file"
-
-    # Preparar SQL com progresso
-    local modified_sql="$TEMP_DIR/modified_restore.sql"
-    prepare_sql_with_progress "$BACKUP_DIR/temp_restore.sql" "$modified_sql" "$progress_file" "$operation_file"
-
     # Analisar e recriar estruturas ausentes
-    analyze_and_recreate_structures "$DB" "$modified_sql"
+    analyze_and_recreate_structures "$DB" "$BACKUP_DIR/temp_restore.sql"
 
     # Dropar conexões existentes
     docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB' AND pid <> pg_backend_pid();" >/dev/null 2>&1
+        psql -U "$PG_USER" -d "$DB" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB' AND pid <> pg_backend_pid();"
 
-    # Contar operações
-    local total_operations
-    total_operations=$(grep -c '\\!' "$modified_sql" || echo "0")
-    total_operations=$((total_operations + 1))
-    echo_info "Total de operações: $total_operations"
-
-    # Restaurar com barra de progresso
-    (
-        docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-            psql -U "$PG_USER" -d "$DB" -f "/var/backups/postgres/modified_restore.sql" > /dev/null 2>>"$LOG_FILE"
-    ) &
-    local psql_pid=$!
-
-    while kill -0 "$psql_pid" 2>/dev/null; do
-        local current
-        current=$(cat "$progress_file" 2>/dev/null || echo "0")
-        local current_operation
-        current_operation=$(cat "$operation_file" 2>/dev/null || echo "")
-        show_progress "$current" "$total_operations" "$current_operation"
-        sleep 0.1
-    done
-    wait "$psql_pid"
-    local restore_status=$?
-    echo # Nova linha após barra de progresso
-
-    # Limpar
-    rm -f "$BACKUP_DIR/temp_restore.sql" "$progress_file" "$operation_file" "$modified_sql"
-
-    if [ "$restore_status" -eq 0 ]; then
+    # Restaurar dados
+    if docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+        psql -U "$PG_USER" -d "$DB" -f "/var/backups/postgres/temp_restore.sql" 2>>"$LOG_FILE"; then
         echo_success "Restauração concluída com sucesso."
         send_webhook "{
             \"action\": \"Restauração realizada com sucesso\",
@@ -586,6 +476,10 @@ function do_restore() {
             \"status\": \"ERROR\"
         }"
     fi
+
+    # Limpar arquivos temporários
+    rm -f "$BACKUP_DIR/temp_restore.sql"
+    rm -rf "$TEMP_DIR"/*
 }
 
 # Função principal
@@ -607,13 +501,7 @@ function main() {
             source "$ENV_FILE"
             do_restore
             ;;
-        "--clean")
-            cleanup_old_installation
-            ;;
         *)
-            # Limpar instalação anterior primeiro
-            cleanup_old_installation
-
             # Configuração inicial
             setup_config
 
@@ -635,7 +523,7 @@ declare -A BACKUP_SIZES
 declare -A BACKUP_FILES
 declare -A DELETED_BACKUPS
 
-$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs send_consolidated_webhook ensure_backup_possible ensure_database_exists do_backup analyze_and_recreate_structures show_progress prepare_sql_with_progress)
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs send_consolidated_webhook ensure_backup_possible ensure_database_exists do_backup analyze_and_recreate_structures)
 do_backup
 EOF
             chmod +x /usr/local/bin/pg_backup
@@ -655,7 +543,7 @@ declare -A BACKUP_SIZES
 declare -A BACKUP_FILES
 declare -A DELETED_BACKUPS
 
-$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs send_consolidated_webhook ensure_backup_possible ensure_database_exists create_database_if_not_exists do_restore analyze_and_recreate_structures show_progress prepare_sql_with_progress)
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs ensure_database_exists analyze_and_recreate_structures create_database_if_not_exists do_restore)
 do_restore
 EOF
             chmod +x /usr/local/bin/pg_restore_db
@@ -667,7 +555,6 @@ EOF
             echo_info "Comandos disponíveis:"
             echo "  Backup manual: pg_backup"
             echo "  Restauração: pg_restore_db"
-            echo "  Limpar instalação: pg_backup_manager.sh --clean"
 
             read -p "Deseja executar um backup agora? (yes/no): " do_backup_now
             if [[ "$do_backup_now" =~ ^(yes|y|Y) ]]; then
