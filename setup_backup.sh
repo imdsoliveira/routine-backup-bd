@@ -12,7 +12,6 @@
 # - Criação automática de estruturas
 # - Gerenciamento de logs com rotação
 # - Recriação automática de estruturas ausentes
-# - Verificação pré-backup para garantir a existência do banco de dados
 # =============================================================================
 
 set -e
@@ -188,82 +187,32 @@ function ensure_database_exists() {
     fi
 }
 
-# Função para verificar se o backup é possível (verificar existência do banco)
-function ensure_backup_possible() {
-    local db="$1"
-    if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$db"; then
-        echo_error "Banco de dados '$db' não existe"
-        return 1
-    fi
-    return 0
-}
-
-# Função para criar banco de dados se não existir (usada na restauração)
-function create_database_if_not_exists() {
-    local db_name="$1"
-    ensure_database_exists "$db_name"
-}
-
 # Função para analisar e recriar estruturas ausentes
 function analyze_and_recreate_structures() {
     local DB="$1"
     local BACKUP_FILE="$2"
     echo_info "Analisando estruturas do banco '$DB'..."
 
-    # Extrair apenas as estruturas (CREATE SEQUENCE, CREATE TABLE, CREATE INDEX, etc.)
-    local SEQUENCES_FILE="$TEMP_DIR/sequences.sql"
-    local TABLES_FILE="$TEMP_DIR/tables.sql"
-    local INDEXES_FILE="$TEMP_DIR/indexes.sql"
+    # Extrair apenas as estruturas (CREATE TABLE, etc.)
+    local STRUCTURES_FILE="$TEMP_DIR/structures.sql"
+    grep -E '^CREATE (TABLE|INDEX|VIEW|SEQUENCE)' "$BACKUP_FILE" > "$STRUCTURES_FILE"
 
-    grep -E '^CREATE SEQUENCE' "$BACKUP_FILE" > "$SEQUENCES_FILE"
-    grep -E '^CREATE TABLE' "$BACKUP_FILE" > "$TABLES_FILE"
-    grep -E '^CREATE INDEX' "$BACKUP_FILE" > "$INDEXES_FILE"
-
-    # Processar na ordem correta: sequences, tabelas, índices
-    for file in "$SEQUENCES_FILE" "$TABLES_FILE" "$INDEXES_FILE"; do
-        [ -f "$file" ] || continue
-        while IFS= read -r create_stmt; do
-            if [[ "$create_stmt" =~ ^CREATE[[:space:]]+(SEQUENCE|TABLE|INDEX)[[:space:]]+\"?([^\"]+)\"?[[:space:]]* ]]; then
-                local structure_type="${BASH_REMATCH[1]}"
-                local structure_name="${BASH_REMATCH[2]}"
-                echo_info "Verificando $structure_type \"$structure_name\"..."
-
-                case "$structure_type" in
-                    SEQUENCE)
-                        # Verificar se a sequência existe
-                        if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-                            psql -U "$PG_USER" -d "$DB" -c "\ds \"$structure_name\"" &>/dev/null; then
-                            echo_info "Criando sequência \"$structure_name\"..."
-                            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-                                psql -U "$PG_USER" -d "$DB" -c "$create_stmt"
-                        fi
-                        ;;
-                    TABLE)
-                        # Verificar se a tabela existe
-                        if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-                            psql -U "$PG_USER" -d "$DB" -c "\d \"$structure_name\"" &>/dev/null; then
-                            echo_info "Criando tabela \"$structure_name\"..."
-                            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-                                psql -U "$PG_USER" -d "$DB" -c "$create_stmt"
-                        fi
-                        ;;
-                    INDEX)
-                        # Verificar se o índice existe
-                        if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-                            psql -U "$PG_USER" -d "$DB" -c "\di \"$structure_name\"" &>/dev/null; then
-                            echo_info "Criando índice \"$structure_name\"..."
-                            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-                                psql -U "$PG_USER" -d "$DB" -c "$create_stmt"
-                        fi
-                        ;;
-                esac
+    # Para cada estrutura, verificar se existe e criar se necessário
+    while IFS= read -r create_stmt; do
+        if [[ "$create_stmt" =~ ^CREATE[[:space:]]+TABLE[[:space:]]+\"?([^\"]+)\"?[[:space:]]*\( ]]; then
+            local table_name="${BASH_REMATCH[1]}"
+            echo_info "Verificando tabela \"$table_name\"..."
+            if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+                psql -U "$PG_USER" -d "$DB" -c "\d \"$table_name\"" &>/dev/null; then
+                echo_info "Criando tabela \"$table_name\"..."
+                docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+                    psql -U "$PG_USER" -d "$DB" -c "$create_stmt"
             fi
-        done < "$file"
-    done
+        fi
+        # Adicione mais condições se necessário para outras estruturas como INDEX, VIEW, etc.
+    done < "$STRUCTURES_FILE"
 
-    # Limpar arquivos temporários
-    rm -f "$SEQUENCES_FILE" "$TABLES_FILE" "$INDEXES_FILE"
+    rm -f "$STRUCTURES_FILE"
 }
 
 # Função para enviar webhook consolidado
@@ -342,8 +291,6 @@ function do_backup() {
         psql -U "$PG_USER" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false;")
 
     for db in $databases; do
-        ensure_backup_possible "$db" || continue
-
         local BACKUP_FILENAME="postgres_backup_${TIMESTAMP}_${db}.sql"
         local BACKUP_PATH="$BACKUP_DIR/$BACKUP_FILENAME"
 
@@ -392,7 +339,7 @@ function do_restore() {
     echo_info "Bancos de dados disponíveis:"
     local DATABASES
     DATABASES=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false;")
+        psql -U "$PG_USER" -tAc "SELECT datname FROM pg_database WHERE datistemplate = false;")
 
     select DB in $DATABASES "Cancelar"; do
         if [ "$DB" = "Cancelar" ]; then
@@ -512,18 +459,7 @@ function main() {
             cat > /usr/local/bin/pg_backup <<EOF
 #!/bin/bash
 source "$ENV_FILE"
-LOG_FILE="$LOG_FILE"
-BACKUP_DIR="$BACKUP_DIR"
-TEMP_DIR="$TEMP_DIR"
-MAX_LOG_SIZE="$MAX_LOG_SIZE"
-
-# Declarar arrays associativos
-declare -A BACKUP_RESULTS
-declare -A BACKUP_SIZES
-declare -A BACKUP_FILES
-declare -A DELETED_BACKUPS
-
-$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs send_consolidated_webhook ensure_backup_possible ensure_database_exists do_backup analyze_and_recreate_structures)
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook do_backup rotate_logs)
 do_backup
 EOF
             chmod +x /usr/local/bin/pg_backup
@@ -532,18 +468,7 @@ EOF
             cat > /usr/local/bin/pg_restore_db <<EOF
 #!/bin/bash
 source "$ENV_FILE"
-LOG_FILE="$LOG_FILE"
-BACKUP_DIR="$BACKUP_DIR"
-TEMP_DIR="$TEMP_DIR"
-MAX_LOG_SIZE="$MAX_LOG_SIZE"
-
-# Declarar arrays associativos
-declare -A BACKUP_RESULTS
-declare -A BACKUP_SIZES
-declare -A BACKUP_FILES
-declare -A DELETED_BACKUPS
-
-$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs ensure_database_exists analyze_and_recreate_structures create_database_if_not_exists do_restore)
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook do_restore rotate_logs ensure_database_exists analyze_and_recreate_structures)
 do_restore
 EOF
             chmod +x /usr/local/bin/pg_restore_db
