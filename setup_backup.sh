@@ -25,9 +25,9 @@ set -o pipefail
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m'
+NC='\033[0m' # Sem cor
 
-# Mensagens de log
+# Funções de Utilidade
 echo_info() {
     echo -e "${YELLOW}[INFO]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${YELLOW}[INFO]${NC} $1"
 }
@@ -164,10 +164,12 @@ setup_config() {
             read -p "Usuário PostgreSQL [$PG_USER]: " new_user
             PG_USER=${new_user:-$PG_USER}
             
-            # Senha (sempre pedir para maior segurança e exibir na tela)
-            read -p "Senha PostgreSQL (Enter para manter atual): " new_password
+            # Senha (pedir sempre para maior segurança)
+            read -s -p "Senha PostgreSQL (Pressione Enter para manter a atual): " new_password
+            echo
             if [ -n "$new_password" ]; then
-                read -p "Confirme a senha: " confirm_password
+                read -s -p "Confirme a senha: " confirm_password
+                echo
                 if [ "$new_password" = "$confirm_password" ]; then
                     PG_PASSWORD="$new_password"
                 else
@@ -197,16 +199,16 @@ setup_config() {
         PG_USER=${PG_USER:-postgres}
         
         # Senha PostgreSQL (visível)
-        read -s -p "Senha PostgreSQL: " PG_PASSWORD
-        echo
-        read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
-        echo
-        while [ "$PG_PASSWORD" != "$PG_PASSWORD_CONFIRM" ]; do
-            echo_warning "As senhas não coincidem. Tente novamente."
+        while true; do
             read -s -p "Senha PostgreSQL: " PG_PASSWORD
             echo
             read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
             echo
+            if [ "$PG_PASSWORD" == "$PG_PASSWORD_CONFIRM" ]; then
+                break
+            else
+                echo_warning "As senhas não coincidem. Tente novamente."
+            fi
         done
         
         # Retenção
@@ -215,6 +217,13 @@ setup_config() {
         
         # Webhook
         read -p "URL do Webhook: " WEBHOOK_URL
+        if ! curl -s -o /dev/null "$WEBHOOK_URL"; then
+            echo_warning "Não foi possível validar o webhook. Continuar mesmo assim? (yes/no): "
+            read confirm
+            if [[ ! "$confirm" =~ ^(yes|y|Y) ]]; then
+                exit 1
+            fi
+        fi
     fi
 
     # Salvar configurações em múltiplos locais com redundância
@@ -518,7 +527,7 @@ do_backup() {
             gzip -f "$BACKUP_PATH"
             BACKUP_PATH="${BACKUP_PATH}.gz"
 
-            local BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
+            local BACKUP_SIZE=$(ls -lh "$BACKUP_PATH" | awk '{print $5}')
             echo_success "Backup concluído: $(basename "$BACKUP_PATH") (Tamanho: $BACKUP_SIZE)"
 
             # Armazenar resultados para webhook consolidado
@@ -552,83 +561,75 @@ do_backup() {
 do_restore() {
     rotate_logs
 
-    # Primeiro selecionar o backup
-    echo_info "Backups disponíveis:"
-    mapfile -t BACKUPS < <(find "$BACKUP_DIR" -type f -name "postgres_backup_*.sql.gz" -print | sort -r)
+    echo_info "Bancos de dados disponíveis:"
+    local DATABASES
+    DATABASES=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+        psql -U "$PG_USER" -tAc "SELECT datname FROM pg_database WHERE datistemplate = false;" | tr -d ' \t\n')
 
-    if [ ${#BACKUPS[@]} -eq 0 ]; then
-        echo_error "Nenhum backup encontrado"
-        return 1
-    fi
-
-    # Mostrar backups disponíveis
-    for i in "${!BACKUPS[@]}"; do
-        local file_size
-        file_size=$(du -h "${BACKUPS[$i]}" | cut -f1)
-        local file_date
-        file_date=$(stat -c %y "${BACKUPS[$i]}" | cut -d. -f1)
-        echo "$((i+1))) $(basename "${BACKUPS[$i]}") (Tamanho: $file_size, Data: $file_date)"
-    done
-
-    # Selecionar backup
-    while true; do
-        read -p "Digite o número do backup (ou 0 para cancelar): " selection
-        if [ "$selection" = "0" ]; then
-            echo_info "Restauração cancelada."
+    # Exibir seleção de banco de dados
+    echo "Selecione o banco de dados para restauração:"
+    select DB in $DATABASES "Cancelar"; do
+        if [ "$DB" = "Cancelar" ]; then
+            echo_info "Restauração cancelada pelo usuário."
             return 0
-        elif [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -le "${#BACKUPS[@]}" ]; then
-            BACKUP="${BACKUPS[$((selection-1))]}"
+        elif [ -n "$DB" ]; then
             break
         fi
         echo_warning "Seleção inválida."
     done
 
-    # Extrair nome do banco do arquivo de backup
-    local DB
-    DB=$(basename "$BACKUP" | sed -E 's/postgres_backup_[0-9]+_(.*)\.sql\.gz/\1/')
+    echo_info "Backups disponíveis para '$DB':"
+    mapfile -t BACKUPS < <(find "$BACKUP_DIR" -type f -name "postgres_backup_*_${DB}.sql.gz" -print | sort -r)
+
+    if [ ${#BACKUPS[@]} -eq 0 ]; then
+        echo_error "Nenhum backup encontrado para $DB"
+        return 1
+    fi
+
+    echo "Backups disponíveis:"
+    for i in "${!BACKUPS[@]}"; do
+        local file_size
+        file_size=$(ls -lh "${BACKUPS[$i]}" | awk '{print $5}')
+        local file_date
+        file_date=$(ls -l --time-style=long-iso "${BACKUPS[$i]}" | awk '{print $6, $7}')
+        echo "$((i+1))) $(basename "${BACKUPS[$i]}") (Tamanho: $file_size, Data: $file_date)"
+    done
+
+    while true; do
+        read -p "Digite o número do backup (ou 0 para cancelar): " selection
+        if [ "$selection" = "0" ]; then
+            echo_info "Restauração cancelada pelo usuário."
+            return 0
+        elif [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -le "${#BACKUPS[@]}" ]; then
+            BACKUP="${BACKUPS[$((selection-1))]}"
+            break
+        fi
+        echo_warning "Seleção inválida. Tente novamente."
+    done
 
     echo_warning "ATENÇÃO: Isso irá substituir o banco '$DB' existente!"
     read -p "Digite 'sim' para confirmar: " CONFIRM
     if [ "$CONFIRM" != "sim" ]; then
-        echo_info "Restauração cancelada."
+        echo_info "Restauração cancelada pelo usuário."
         return 0
     fi
 
     echo_info "Restaurando backup '$BACKUP' em '$DB'..."
 
-    # Verificar e atualizar container se necessário
-    verify_container "$CONTAINER_NAME"
-
-    # Criar banco se não existir
-    echo_info "Verificando banco de dados '$DB'..."
-    if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$DB"; then
-        echo_info "Criando banco de dados '$DB'..."
-        if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-            psql -U "$PG_USER" -c "CREATE DATABASE \"$DB\" WITH TEMPLATE template0;" 2>>"$LOG_FILE"; then
-            echo_error "Falha ao criar banco de dados '$DB'"
-            return 1
-        fi
-        echo_success "Banco de dados criado com sucesso"
-    fi
-
-    # Verificar se o banco foi criado
-    if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$DB"; then
-        echo_error "Não foi possível criar o banco de dados '$DB'"
-        return 1
-    fi
+    # Garantir que o banco exista
+    create_database_if_not_exists "$DB"
 
     # Descomprimir backup
-    echo_info "Descomprimindo backup..."
     gunzip -c "$BACKUP" > "$BACKUP_DIR/temp_restore.sql"
 
-    # Corrigir sintaxe SQL
-    echo_info "Corrigindo sintaxe SQL..."
-    sed -i 's/CREATE TABLE \([^(]*\)(/CREATE TABLE \1 ();/g' "$BACKUP_DIR/temp_restore.sql"
-    sed -i 's/^);$/ALTER TABLE/g' "$BACKUP_DIR/temp_restore.sql"
+    # Analisar e recriar estruturas ausentes
+    analyze_and_recreate_structures "$DB" "$BACKUP_DIR/temp_restore.sql"
 
-    # Criar arquivos temporários para progresso
+    # Dropar conexões existentes
+    docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+        psql -U "$PG_USER" -d "$DB" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB' AND pid <> pg_backend_pid();" >/dev/null 2>&1
+
+    # Restaurar dados com barra de progresso
     local progress_file="$TEMP_DIR/progress"
     local operation_file="$TEMP_DIR/operation"
     echo "0" > "$progress_file"
@@ -637,13 +638,6 @@ do_restore() {
     # Preparar SQL com progresso
     local modified_sql="$TEMP_DIR/modified_restore.sql"
     prepare_sql_with_progress "$BACKUP_DIR/temp_restore.sql" "$modified_sql" "$progress_file" "$operation_file"
-
-    # Analisar e recriar estruturas ausentes
-    analyze_and_recreate_structures "$DB" "$modified_sql"
-
-    # Dropar conexões existentes
-    docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB' AND pid <> pg_backend_pid();" >/dev/null 2>&1
 
     # Contar operações
     local total_operations
@@ -692,6 +686,10 @@ do_restore() {
             \"status\": \"ERROR\"
         }"
     fi
+
+    # Limpar arquivos temporários
+    rm -f "$BACKUP_DIR/temp_restore.sql"
+    rm -rf "$TEMP_DIR"/*
 }
 
 # Função principal
@@ -735,21 +733,18 @@ main() {
                 exit 0
             fi
 
-            # Limpar instalação anterior primeiro
-            cleanup_old_installation
-
             # Configuração inicial
             setup_config
 
-            # Criar links simbólicos (já feitos no script de instalação)
-
-            # Configurar cron para backup diário às 00:00 (já feito no script de instalação)
+            # Configurar container após atualização
+            source "$ENV_FILE"
+            verify_container "$CONTAINER_NAME"
 
             echo_success "Configuração concluída com sucesso!"
             echo_info "Comandos disponíveis:"
-            echo "  Backup manual: pg_backup"
-            echo "  Restauração: pg_restore_db"
-            echo "  Limpar instalação: pg_backup_manager.sh --clean"
+            echo "  - pg_backup         : Executar backup manualmente."
+            echo "  - pg_restore_db     : Executar restauração manualmente."
+            echo "  - pg_backup_manager.sh --clean : Limpar instalação anterior."
 
             # Solicitar execução imediata do backup, se desejado
             read -p "Deseja executar um backup agora? (yes/no): " do_backup_now
