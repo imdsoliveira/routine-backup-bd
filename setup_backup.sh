@@ -2,14 +2,14 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 1.4.0
+# Versão: 1.4.1
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
 # - Notificações webhook consolidadas
-# - Restauração interativa
+# - Restauração interativa com barra de progresso
 # - Detecção automática de container PostgreSQL
-# - Criação automática de estruturas
+# - Criação automática de estruturas (sequências, tabelas e índices)
 # - Gerenciamento de logs com rotação
 # - Recriação automática de estruturas ausentes
 # - Verificação pré-backup para garantir a existência do banco de dados
@@ -266,6 +266,59 @@ function analyze_and_recreate_structures() {
     rm -f "$SEQUENCES_FILE" "$TABLES_FILE" "$INDEXES_FILE"
 }
 
+# Função para mostrar barra de progresso com operação atual
+function show_progress() {
+    local current=$1
+    local total=$2
+    local operation="$3"
+    local width=50
+    local percentage=$((current * 100 / total))
+    local filled=$((width * current / total))
+    local empty=$((width - filled))
+
+    printf "\r\033[K" # Limpar linha atual
+    printf "Progresso: ["
+    printf "%${filled}s" '' | tr ' ' '#'
+    printf "%${empty}s" '' | tr ' ' '-'
+    printf "] %3d%%" "$percentage"
+    if [ -n "$operation" ]; then
+        printf " %s" "$operation"
+    fi
+}
+
+# Função para preparar arquivo SQL com rastreamento de progresso
+function prepare_sql_with_progress() {
+    local input_file="$1"
+    local output_file="$2"
+    local progress_file="$3"
+    local operation_file="$4"
+
+    awk -v progress_file="$progress_file" -v operation_file="$operation_file" '
+    /^(SET|CREATE|ALTER|COPY|INSERT)/ {
+        # Extrair descrição da operação
+        operation = $0
+        if ($1 == "COPY") {
+            operation = "Copiando dados para tabela " $2
+        } else if ($1 == "CREATE" && $2 == "TABLE") {
+            operation = "Criando tabela " $3
+        } else if ($1 == "CREATE" && $2 == "INDEX") {
+            operation = "Criando índice " $3
+        } else if ($1 == "ALTER" && $2 == "TABLE") {
+            operation = "Alterando tabela " $3
+        }
+        
+        # Escapar possíveis aspas na operação
+        gsub(/"/, "\\\"", operation)
+        
+        print $0;
+        print "\\! (echo $(($(cat \"" progress_file "\")) + 1) > \"" progress_file "\"; echo \"" operation "\" > \"" operation_file "\");"
+    }
+    !/^(SET|CREATE|ALTER|COPY|INSERT)/ {
+        print $0;
+    }
+    ' "$input_file" > "$output_file"
+}
+
 # Função para enviar webhook consolidado
 function send_consolidated_webhook() {
     local success_count=0
@@ -448,16 +501,50 @@ function do_restore() {
     # Descomprimir backup
     gunzip -c "$BACKUP" > "$BACKUP_DIR/temp_restore.sql"
 
+    # Criar arquivos temporários para acompanhar progresso
+    local progress_file="$TEMP_DIR/progress"
+    local operation_file="$TEMP_DIR/operation"
+    echo "0" > "$progress_file"
+    echo "" > "$operation_file"
+
+    # Modificar arquivo SQL para incluir progresso
+    local modified_sql="$TEMP_DIR/modified_restore.sql"
+    prepare_sql_with_progress "$BACKUP_DIR/temp_restore.sql" "$modified_sql" "$progress_file" "$operation_file"
+
     # Analisar e recriar estruturas ausentes
-    analyze_and_recreate_structures "$DB" "$BACKUP_DIR/temp_restore.sql"
+    analyze_and_recreate_structures "$DB" "$modified_sql"
 
     # Dropar conexões existentes
     docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
         psql -U "$PG_USER" -d "$DB" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB' AND pid <> pg_backend_pid();"
 
-    # Restaurar dados
-    if docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -d "$DB" -f "/var/backups/postgres/temp_restore.sql" 2>>"$LOG_FILE"; then
+    # Contar total de operações
+    local total_operations
+    total_operations=$(grep -c '\\!' "$modified_sql" || true)
+    total_operations=${total_operations:-1}
+
+    # Restaurar com barra de progresso
+    (
+        docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+            psql -U "$PG_USER" -d "$DB" -f "/var/backups/postgres/modified_restore.sql" > /dev/null 2>>"$LOG_FILE"
+    ) &
+    local psql_pid=$!
+
+    while kill -0 "$psql_pid" 2>/dev/null; do
+        local current
+        local current_operation
+        current=$(cat "$progress_file")
+        current_operation=$(cat "$operation_file")
+        show_progress "$current" "$total_operations" "$current_operation"
+        sleep 0.1
+    done
+    wait "$psql_pid"
+    local restore_status=$?
+
+    # Limpar linha da barra de progresso
+    echo
+
+    if [ "$restore_status" -eq 0 ]; then
         echo_success "Restauração concluída com sucesso."
         send_webhook "{
             \"action\": \"Restauração realizada com sucesso\",
@@ -523,7 +610,7 @@ declare -A BACKUP_SIZES
 declare -A BACKUP_FILES
 declare -A DELETED_BACKUPS
 
-$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs send_consolidated_webhook ensure_backup_possible ensure_database_exists do_backup analyze_and_recreate_structures)
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs send_consolidated_webhook ensure_backup_possible ensure_database_exists do_backup analyze_and_recreate_structures show_progress prepare_sql_with_progress)
 do_backup
 EOF
             chmod +x /usr/local/bin/pg_backup
@@ -543,7 +630,7 @@ declare -A BACKUP_SIZES
 declare -A BACKUP_FILES
 declare -A DELETED_BACKUPS
 
-$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs ensure_database_exists analyze_and_recreate_structures create_database_if_not_exists do_restore)
+$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs ensure_database_exists analyze_and_recreate_structures create_database_if_not_exists do_restore show_progress prepare_sql_with_progress)
 do_restore
 EOF
             chmod +x /usr/local/bin/pg_restore_db
