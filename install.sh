@@ -1,275 +1,449 @@
 #!/bin/bash
 
-# Diretório de instalação
-INSTALL_DIR="$HOME/postgres_backup"
-BACKUP_SCRIPT="$INSTALL_DIR/backup.sh"
-RESTORE_SCRIPT="$INSTALL_DIR/restore.sh"
-ENV_FILE="$INSTALL_DIR/.env"
+# Script para configurar rotina de backup automática do PostgreSQL em servidores Dockerizados
+set -e
 
-# Função para verificar se um comando existe
-command_exists () {
-    command -v "$1" >/dev/null 2>&1 ;
+# Funções de utilidade
+function echo_info() { echo -e "\e[34m[INFO]\e[0m $1"; sleep 1; }
+function echo_success() { echo -e "\e[32m[SUCCESS]\e[0m $1"; sleep 1; }
+function echo_warning() { echo -e "\e[33m[WARNING]\e[0m $1"; sleep 1; }
+function echo_error() { echo -e "\e[31m[ERROR]\e[0m $1"; sleep 1; }
+function command_exists() { command -v "$1" >/dev/null 2>&1; }
+function valid_url() { [[ "$1" =~ ^https?://.+ ]]; }
+
+ENV_FILE="/root/.backup_postgres.env"
+
+# Função para enviar webhook
+function send_webhook() {
+    local payload="$1"
+    curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
 }
 
-# Instalar dependências
-echo "Instalando dependências necessárias..."
-if command_exists curl; then
-    echo "curl já está instalado."
-else
-    sudo apt-get update
-    sudo apt-get install -y curl
-fi
+# Função para carregar variáveis do arquivo .env
+load_env() {
+    if [ -f "$ENV_FILE" ]; then
+        echo_info "Configurações existentes encontradas:"
+        cat "$ENV_FILE"
+        echo ""
+        read -p "Deseja usar estas configurações? (yes/no): " USE_EXISTING
+        if [[ "$USE_EXISTING" =~ ^(yes|Yes|YES)$ ]]; then
+            source "$ENV_FILE"
+            return 0
+        fi
+    fi
+    return 1
+}
 
-if command_exists jq; then
-    echo "jq já está instalado."
-else
-    sudo apt-get install -y jq
-fi
-
-# Criar diretório de instalação
-mkdir -p "$INSTALL_DIR"
-echo "Diretório de instalação criado em $INSTALL_DIR."
-
-# Criar arquivo .env
-if [ ! -f "$ENV_FILE" ]; then
-    echo "Configurando variáveis de ambiente..."
-
-    read -p "Digite a URL do Webhook: " WEBHOOK_URL
-    read -p "Digite o usuário do PostgreSQL: " POSTGRES_USER
-    read -s -p "Digite a senha do PostgreSQL: " POSTGRES_PASSWORD
-    echo
-    read -p "Digite o host do PostgreSQL (ex: localhost): " POSTGRES_HOST
-    read -p "Digite a porta do PostgreSQL (ex: 5432): " POSTGRES_PORT
-    read -p "Digite o valor de retenção de dias para backups: " RETENTION_DAYS
-
-    cat <<EOF > "$ENV_FILE"
+# Função para salvar variáveis no arquivo .env
+save_env() {
+    cat > "$ENV_FILE" <<EOF
+PG_USER="$PG_USER"
+PG_PASSWORD="$PG_PASSWORD"
+RETENTION_DAYS="$RETENTION_DAYS"
 WEBHOOK_URL="$WEBHOOK_URL"
-POSTGRES_USER="$POSTGRES_USER"
-POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
-POSTGRES_HOST="$POSTGRES_HOST"
-POSTGRES_PORT="$POSTGRES_PORT"
-RETENTION_DAYS=$RETENTION_DAYS
-BACKUP_DIR="$INSTALL_DIR/backups"
+BACKUP_OPTION="$BACKUP_OPTION"
+CONTAINER_NAME="$CONTAINER_NAME"
+BACKUP_DIR="/var/backups/postgres"
 EOF
+    chmod 600 "$ENV_FILE"
+    echo_success "Configurações salvas em $ENV_FILE"
+}
 
-    echo ".env configurado com sucesso."
-else
-    echo ".env já existe. Pulando configuração."
-fi
+# Função principal de backup
+do_backup() {
+    local DB="$1"
+    local TIMESTAMP=$(date +%Y%m%d%H%M%S)
+    local BACKUP_FILENAME="postgres_backup_${TIMESTAMP}_${DB}.backup"
+    local BACKUP_PATH="$BACKUP_DIR/$BACKUP_FILENAME"
+    
+    echo_info "Iniciando backup do banco '$DB'..."
+    
+    case "$BACKUP_OPTION" in
+        1)
+            echo_info "Realizando backup completo com inserts..."
+            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+                pg_dump -U "$PG_USER" -F p --inserts "$DB" > "$BACKUP_PATH"
+            ;;
+        2)
+            echo_info "Realizando backup apenas da estrutura..."
+            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+                pg_dump -U "$PG_USER" -F c --schema-only "$DB" > "$BACKUP_PATH"
+            ;;
+        3)
+            echo_info "Digite as tabelas para backup (separadas por espaço):"
+            read -a TABLES
+            if [ ${#TABLES[@]} -eq 0 ]; then
+                echo_error "Nenhuma tabela especificada"
+                return 1
+            fi
+            local TABLE_ARGS=""
+            for table in "${TABLES[@]}"; do
+                TABLE_ARGS="$TABLE_ARGS -t $table"
+            done
+            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+                pg_dump -U "$PG_USER" $TABLE_ARGS --inserts "$DB" > "$BACKUP_PATH"
+            ;;
+        *)
+            echo_error "Opção de backup inválida."
+            return 1
+            ;;
+    esac
+    
+    if [ $? -eq 0 ]; then
+        local BACKUP_SIZE=$(du -h "$BACKUP_PATH" | awk '{print $1}')
+        echo_success "Backup concluído: $BACKUP_FILENAME (Tamanho: $BACKUP_SIZE)"
+        send_webhook "{\"action\":\"Backup realizado com sucesso\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"database_name\":\"$DB\",\"backup_file\":\"$BACKUP_FILENAME\",\"backup_size\":\"$BACKUP_SIZE\",\"retention_days\":$RETENTION_DAYS,\"status\":\"OK\",\"notes\":\"Backup executado conforme cron job configurado. Nenhum erro reportado durante o processo.\"}"
+    else
+        echo_error "Falha no backup de $DB"
+        send_webhook "{\"action\":\"Falha no backup\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"database_name\":\"$DB\",\"backup_file\":\"$BACKUP_FILENAME\",\"status\":\"FAILED\",\"notes\":\"Erro durante o processo de backup.\"}"
+        return 1
+    fi
+}
 
-# Criar diretório de backups
-mkdir -p "$INSTALL_DIR/backups"
-echo "Diretório de backups criado em $INSTALL_DIR/backups."
-
-# Criar backup.sh
-cat <<'EOF' > "$BACKUP_SCRIPT"
-#!/bin/bash
-
-# Carregar variáveis de ambiente
-ENV_FILE="$HOME/postgres_backup/.env"
-
-if [ ! -f "$ENV_FILE" ]; then
-    echo "Arquivo .env não encontrado! Execute o install.sh primeiro."
-    exit 1
-fi
-
-export $(grep -v '^#' "$ENV_FILE" | xargs)
-
-# Diretório de backups
-BACKUP_DIR="$BACKUP_DIR"
-
-# Data e hora atual
-CURRENT_DATE=$(date +"%Y%m%d%H%M%S")
-
-# Nome do arquivo de backup
-BACKUP_FILE="backup_${CURRENT_DATE}.backup"
-
-# Caminho completo do arquivo de backup
-BACKUP_PATH="$BACKUP_DIR/$BACKUP_FILE"
-
-# Identificar o container do PostgreSQL
-CONTAINER_NAME=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}" | head -n 1)
-
-if [ -z "$CONTAINER_NAME" ]; then
-    echo "Nenhum container PostgreSQL encontrado."
-    exit 1
-fi
-
-# Realizar o backup
-echo "Iniciando backup do banco de dados PostgreSQL..."
-docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$CONTAINER_NAME" pg_dumpall -U "$POSTGRES_USER" > "$BACKUP_PATH"
-
-if [ $? -ne 0 ]; then
-    echo "Falha no backup do banco de dados."
-    STATUS="FAILED"
-    NOTES="Erro durante o processo de backup."
-else
-    echo "Backup realizado com sucesso: $BACKUP_FILE"
-    STATUS="OK"
-    NOTES="Backup executado conforme cron job configurado. Nenhum erro reportado durante o processo."
-fi
-
-# Obter tamanho do backup
-BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
-
-# Gerenciar retenção de backups
-echo "Gerenciando retenção de backups. Mantendo os últimos $RETENTION_DAYS dias..."
-DELETED_BACKUPS=$(find "$BACKUP_DIR" -type f -name "backup_*.backup" -mtime +$RETENTION_DAYS)
-
-if [ -n "$DELETED_BACKUPS" ]; then
-    DELETED_JSON=""
-    for backup in $DELETED_BACKUPS; do
-        BACKUP_NAME=$(basename "$backup")
-        rm "$backup"
-        DELETED_JSON+="$(jq -n \
-            --arg backup_name "$BACKUP_NAME" \
-            --arg deletion_reason "Prazo de retenção expirado" \
-            '{backup_name: $backup_name, deletion_reason: $deletion_reason}')"
-        DELETED_JSON+=","
+# Função principal de restauração
+do_restore() {
+    echo_info "Bancos de dados disponíveis:"
+    local DATABASES=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+        psql -U "$PG_USER" -tAc "SELECT datname FROM pg_database WHERE datistemplate = false;")
+    
+    select DB in $DATABASES "Cancelar"; do
+        if [ "$DB" = "Cancelar" ]; then
+            return 0
+        elif [ -n "$DB" ]; then
+            break
+        fi
+        echo "Seleção inválida"
     done
-    # Remover a última vírgula
-    DELETED_JSON=${DELETED_JSON%,}
-fi
+    
+    echo_info "Backups disponíveis para $DB:"
+    local BACKUPS=($(ls -1 "$BACKUP_DIR" | grep "_${DB}.backup\$"))
+    
+    if [ ${#BACKUPS[@]} -eq 0 ]; then
+        echo_error "Nenhum backup encontrado para $DB"
+        return 1
+    fi
+    
+    select BACKUP in "${BACKUPS[@]}" "Cancelar"; do
+        if [ "$BACKUP" = "Cancelar" ]; then
+            return 0
+        elif [ -n "$BACKUP" ]; then
+            break
+        fi
+        echo "Seleção inválida"
+    done
+    
+    read -p "Confirma a restauração? ISSO SUBSTITUIRÁ O BANCO ATUAL (yes/no): " CONFIRM
+    if [[ ! "$CONFIRM" =~ ^(yes|Yes|YES)$ ]]; then
+        echo_warning "Restauração cancelada."
+        return 0
+    fi
+    
+    echo_info "Restaurando $BACKUP em $DB..."
+    docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" psql -U "$PG_USER" -d "$DB" -f "$BACKUP_DIR/$BACKUP"
+    
+    if [ $? -eq 0 ]; then
+        echo_success "Restauração concluída com sucesso"
+        send_webhook "{\"action\":\"Restauração realizada com sucesso\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"database_name\":\"$DB\",\"backup_file\":\"$BACKUP\",\"status\":\"OK\",\"notes\":\"Restauração executada conforme solicitado. Nenhum erro reportado durante o processo.\"}"
+    else
+        echo_error "Falha na restauração"
+        send_webhook "{\"action\":\"Falha na restauração\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"database_name\":\"$DB\",\"backup_file\":\"$BACKUP\",\"status\":\"FAILED\",\"notes\":\"Erro durante o processo de restauração.\"}"
+    fi
+}
 
-# Enviar notificação via webhook
-echo "Enviando notificação via webhook..."
-if [ -n "$DELETED_JSON" ]; then
-    PAYLOAD=$(jq -n \
-        --arg action "Backup realizado com sucesso" \
-        --arg date "$(date +"%d/%m/%Y %H:%M:%S")" \
-        --arg database_name "$POSTGRES_USER" \
-        --arg backup_file "$BACKUP_FILE" \
-        --arg backup_size "$BACKUP_SIZE" \
-        --argjson retention_days "$RETENTION_DAYS" \
-        --arg status "$STATUS" \
-        --arg notes "$NOTES" \
-        '{
-            action: $action,
-            date: $date,
-            database_name: $database_name,
-            backup_file: $backup_file,
-            backup_size: $backup_size,
-            retention_days: $retention_days,
-            status: $status,
-            notes: $notes
-        }' \
-        | jq --argjson deleted_backup "[$DELETED_JSON]" '. + {deleted_backup: $deleted_backup}')
-else
-    PAYLOAD=$(jq -n \
-        --arg action "Backup realizado com sucesso" \
-        --arg date "$(date +"%d/%m/%Y %H:%M:%S")" \
-        --arg database_name "$POSTGRES_USER" \
-        --arg backup_file "$BACKUP_FILE" \
-        --arg backup_size "$BACKUP_SIZE" \
-        --argjson retention_days "$RETENTION_DAYS" \
-        --arg status "$STATUS" \
-        --arg notes "$NOTES" \
-        '{
-            action: $action,
-            date: $date,
-            database_name: $database_name,
-            backup_file: $backup_file,
-            backup_size: $backup_size,
-            retention_days: $retention_days,
-            status: $status,
-            notes: $notes
-        }')
-fi
-
-curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL"
-
-echo "Notificação enviada."
-EOF
-
-chmod +x "$BACKUP_SCRIPT"
-echo "Script backup.sh criado."
-
-# Criar restore.sh
-cat <<'EOF' > "$RESTORE_SCRIPT"
+# Função principal
+main() {
+    echo_info "Iniciando processo de configuração..."
+    
+    if ! load_env; then
+        # Verificar Docker
+        if ! command_exists docker; then
+            echo_error "Docker não está instalado. Por favor, instale o Docker antes de prosseguir."
+            exit 1
+        fi
+    
+        # Identificar containers PostgreSQL
+        echo_info "Identificando containers PostgreSQL em execução..."
+        POSTGRES_CONTAINERS=$(docker ps --format "{{.Names}}" | grep -i 'postgres')
+    
+        if [ -z "$POSTGRES_CONTAINERS" ]; then
+            echo_error "Nenhum container PostgreSQL encontrado."
+            exit 1
+        elif [ $(echo "$POSTGRES_CONTAINERS" | wc -l) -eq 1 ]; then
+            CONTAINER_NAME="$POSTGRES_CONTAINERS"
+            echo_info "Container PostgreSQL identificado: $CONTAINER_NAME"
+        else
+            echo_info "Containers PostgreSQL encontrados:"
+            echo "$POSTGRES_CONTAINERS"
+            read -p "Selecione o nome do container PostgreSQL: " CONTAINER_NAME
+            if ! echo "$POSTGRES_CONTAINERS" | grep -qw "$CONTAINER_NAME"; then
+                echo_error "Container inválido ou não está rodando."
+                exit 1
+            fi
+        fi
+    
+        # Configurar usuário PostgreSQL
+        read -p "Usar usuário padrão 'postgres'? (yes/no) [yes]: " USE_DEFAULT_USER
+        USE_DEFAULT_USER=${USE_DEFAULT_USER:-yes}
+        if [[ "$USE_DEFAULT_USER" =~ ^(yes|Yes|YES)$ ]]; then
+            PG_USER="postgres"
+        else
+            read -p "Usuário PostgreSQL: " PG_USER
+            if [ -z "$PG_USER" ]; then
+                echo_error "Usuário não pode estar vazio."
+                exit 1
+            fi
+        fi
+    
+        # Senha PostgreSQL
+        read -s -p "Senha PostgreSQL: " PG_PASSWORD
+        echo
+        if [ -z "$PG_PASSWORD" ]; then
+            echo_error "Senha não pode estar vazia."
+            exit 1
+        fi
+    
+        # Período de retenção
+        read -p "Período de retenção em dias [30]: " RETENTION_DAYS
+        RETENTION_DAYS=${RETENTION_DAYS:-30}
+    
+        # URL do Webhook
+        while true; do
+            read -p "URL do Webhook: " WEBHOOK_URL
+            if valid_url "$WEBHOOK_URL"; then
+                break
+            else
+                echo_error "URL inválida (use http:// ou https://)"
+            fi
+        done
+    
+        # Tipo de backup
+        echo_info "Tipos de backup disponíveis:"
+        echo "1) Backup completo com inserts"
+        echo "2) Backup apenas da estrutura"
+        echo "3) Backup de tabelas específicas com inserts"
+        read -p "Selecione o tipo [1]: " BACKUP_OPTION
+        BACKUP_OPTION=${BACKUP_OPTION:-1}
+    
+        # Salvar configurações
+        save_env
+    fi
+    
+    # Configurar diretório de backup
+    BACKUP_DIR="/var/backups/postgres"
+    if [ ! -d "$BACKUP_DIR" ]; then
+        echo_info "Criando diretório $BACKUP_DIR..."
+        sudo mkdir -p "$BACKUP_DIR"
+        sudo chown "$USER":"$USER" "$BACKUP_DIR"
+        sudo chmod 700 "$BACKUP_DIR"
+    fi
+    
+    # Criar scripts
+    BACKUP_SCRIPT="/usr/local/bin/backup_postgres.sh"
+    RESTORE_SCRIPT="/usr/local/bin/restore_postgres.sh"
+    
+    # Script de backup
+    echo_info "Criando script de backup..."
+    cat > "$BACKUP_SCRIPT" <<'EOF'
 #!/bin/bash
+source /root/.backup_postgres.env
 
-# Carregar variáveis de ambiente
-ENV_FILE="$HOME/postgres_backup/.env"
+# Funções de utilidade
+function echo_info() { echo -e "\e[34m[INFO]\e[0m $1"; }
+function echo_success() { echo -e "\e[32m[SUCCESS]\e[0m $1"; }
+function echo_warning() { echo -e "\e[33m[WARNING]\e[0m $1"; }
+function echo_error() { echo -e "\e[31m[ERROR]\e[0m $1"; }
 
-if [ ! -f "$ENV_FILE" ]; then
-    echo "Arquivo .env não encontrado! Execute o install.sh primeiro."
-    exit 1
-fi
+# Função para enviar webhook
+function send_webhook() {
+    local payload="$1"
+    curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
+}
 
-export $(grep -v '^#' "$ENV_FILE" | xargs)
+# Função principal de backup
+do_backup() {
+    local DB="$1"
+    local TIMESTAMP=$(date +%Y%m%d%H%M%S)
+    local BACKUP_FILENAME="postgres_backup_${TIMESTAMP}_${DB}.backup"
+    local BACKUP_PATH="$BACKUP_DIR/$BACKUP_FILENAME"
+    
+    echo_info "Iniciando backup do banco '$DB'..."
+    
+    case "$BACKUP_OPTION" in
+        1)
+            echo_info "Realizando backup completo com inserts..."
+            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+                pg_dump -U "$PG_USER" -F p --inserts "$DB" > "$BACKUP_PATH"
+            ;;
+        2)
+            echo_info "Realizando backup apenas da estrutura..."
+            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+                pg_dump -U "$PG_USER" -F c --schema-only "$DB" > "$BACKUP_PATH"
+            ;;
+        3)
+            echo_info "Digite as tabelas para backup (separadas por espaço):"
+            read -a TABLES
+            if [ ${#TABLES[@]} -eq 0 ]; then
+                echo_error "Nenhuma tabela especificada"
+                return 1
+            fi
+            local TABLE_ARGS=""
+            for table in "${TABLES[@]}"; do
+                TABLE_ARGS="$TABLE_ARGS -t $table"
+            done
+            docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+                pg_dump -U "$PG_USER" $TABLE_ARGS --inserts "$DB" > "$BACKUP_PATH"
+            ;;
+        *)
+            echo_error "Opção de backup inválida."
+            return 1
+            ;;
+    esac
+    
+    if [ $? -eq 0 ]; then
+        local BACKUP_SIZE=$(du -h "$BACKUP_PATH" | awk '{print $1}')
+        echo_success "Backup concluído: $BACKUP_FILENAME (Tamanho: $BACKUP_SIZE)"
+        send_webhook "{\"action\":\"Backup realizado com sucesso\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"database_name\":\"$DB\",\"backup_file\":\"$BACKUP_FILENAME\",\"backup_size\":\"$BACKUP_SIZE\",\"retention_days\":$RETENTION_DAYS,\"status\":\"OK\",\"notes\":\"Backup executado conforme cron job configurado. Nenhum erro reportado durante o processo.\"}"
+    else
+        echo_error "Falha no backup de $DB"
+        send_webhook "{\"action\":\"Falha no backup\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"database_name\":\"$DB\",\"backup_file\":\"$BACKUP_FILENAME\",\"status\":\"FAILED\",\"notes\":\"Erro durante o processo de backup.\"}"
+        return 1
+    fi
+}
 
-# Diretório de backups
-BACKUP_DIR="$BACKUP_DIR"
-
-# Listar backups disponíveis
-echo "Listando backups disponíveis:"
-mapfile -t BACKUPS < <(ls "$BACKUP_DIR"/backup_*.backup 2>/dev/null | sort -r)
-
-if [ ${#BACKUPS[@]} -eq 0 ]; then
-    echo "Nenhum backup encontrado."
-    exit 1
-fi
-
-# Exibir lista enumerada
-for i in "${!BACKUPS[@]}"; do
-    echo "$((i+1))). $(basename "${BACKUPS[$i]}")"
+# Executar backups para todos os bancos de dados
+for DB in $(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" psql -U "$PG_USER" -tAc "SELECT datname FROM pg_database WHERE datistemplate = false;"); do
+    do_backup "$DB"
 done
 
-# Selecionar backup
-read -p "Selecione o número do backup que deseja restaurar: " SELECTED
+# Gerenciar retenção de backups
+echo_info "Gerenciando retenção de backups. Mantendo os últimos $RETENTION_DAYS dias..."
+find "$BACKUP_DIR" -type f -name "postgres_backup_*.backup" -mtime +$RETENTION_DAYS -print -exec rm {} \; | while read -r deleted_file; do
+    BACKUP_NAME=$(basename "$deleted_file")
+    send_webhook "{\"action\":\"Backup deletado\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"backup_file\":\"$BACKUP_NAME\",\"deletion_reason\":\"Prazo de retenção expirado\",\"status\":\"OK\",\"notes\":\"Backup deletado conforme política de retenção.\"}"
+done
 
-if ! [[ "$SELECTED" =~ ^[0-9]+$ ]]; then
-    echo "Seleção inválida. Por favor, insira um número válido."
-    exit 1
-fi
-
-INDEX=$((SELECTED-1))
-
-if [ "$INDEX" -lt 0 ] || [ "$INDEX" -ge "${#BACKUPS[@]}" ]; then
-    echo "Número de seleção fora do intervalo."
-    exit 1
-fi
-
-SELECTED_BACKUP="${BACKUPS[$INDEX]}"
-SELECTED_BACKUP_NAME=$(basename "$SELECTED_BACKUP")
-
-# Confirmar restauração
-read -p "Tem certeza de que deseja restaurar o backup '$SELECTED_BACKUP_NAME'? Isso substituirá o banco de dados atual. (yes/no): " CONFIRM
-if [ "$CONFIRM" != "yes" ]; then
-    echo "Restauração cancelada."
-    exit 0
-fi
-
-# Identificar o container do PostgreSQL
-CONTAINER_NAME=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}" | head -n 1)
-
-if [ -z "$CONTAINER_NAME" ]; then
-    echo "Nenhum container PostgreSQL encontrado."
-    exit 1
-fi
-
-# Restaurar o backup
-echo "Iniciando restauração do backup: $SELECTED_BACKUP_NAME"
-docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$CONTAINER_NAME" psql -U "$POSTGRES_USER" -d postgres < "$SELECTED_BACKUP"
-
-if [ $? -ne 0 ]; then
-    echo "Falha na restauração do banco de dados."
-    exit 1
-else
-    echo "Restauração concluída com sucesso."
-fi
 EOF
+    chmod +x "$BACKUP_SCRIPT"
+    echo_success "Script de backup criado em $BACKUP_SCRIPT"
 
-chmod +x "$RESTORE_SCRIPT"
-echo "Script restore.sh criado."
+    # Script de restauração
+    echo_info "Criando script de restauração..."
+    cat > "$RESTORE_SCRIPT" <<'EOF'
+#!/bin/bash
+source /root/.backup_postgres.env
 
-# Configurar cron job
-CRON_JOB="0 0 * * * $BACKUP_SCRIPT >> $INSTALL_DIR/backup.log 2>&1"
+# Funções de utilidade
+function echo_info() { echo -e "\e[34m[INFO]\e[0m $1"; }
+function echo_success() { echo -e "\e[32m[SUCCESS]\e[0m $1"; }
+function echo_warning() { echo -e "\e[33m[WARNING]\e[0m $1"; }
+function echo_error() { echo -e "\e[31m[ERROR]\e[0m $1"; }
 
-# Verificar se o cron job já existe
-(crontab -l 2>/dev/null | grep -F "$BACKUP_SCRIPT") && echo "Cron job já está configurado." || (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+# Função para enviar webhook
+function send_webhook() {
+    local payload="$1"
+    curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
+}
 
-echo "Cron job configurado para executar backup.sh diariamente às 00:00."
+# Função principal de restauração
+do_restore() {
+    echo_info "Bancos de dados disponíveis:"
+    local DATABASES=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
+        psql -U "$PG_USER" -tAc "SELECT datname FROM pg_database WHERE datistemplate = false;")
+    
+    select DB in $DATABASES "Cancelar"; do
+        if [ "$DB" = "Cancelar" ]; then
+            echo_warning "Restauração cancelada pelo usuário."
+            return 0
+        elif [ -n "$DB" ]; then
+            break
+        fi
+        echo "Seleção inválida"
+    done
+    
+    echo_info "Backups disponíveis para $DB:"
+    local BACKUPS=($(ls -1 "$BACKUP_DIR" | grep "_${DB}.backup\$"))
+    
+    if [ ${#BACKUPS[@]} -eq 0 ]; then
+        echo_error "Nenhum backup encontrado para $DB"
+        return 1
+    fi
+    
+    select BACKUP in "${BACKUPS[@]}" "Cancelar"; do
+        if [ "$BACKUP" = "Cancelar" ]; then
+            echo_warning "Restauração cancelada pelo usuário."
+            return 0
+        elif [ -n "$BACKUP" ]; then
+            break
+        fi
+        echo "Seleção inválida"
+    done
+    
+    read -p "Confirma a restauração? ISSO SUBSTITUIRÁ O BANCO ATUAL (yes/no): " CONFIRM
+    if [[ ! "$CONFIRM" =~ ^(yes|Yes|YES)$ ]]; then
+        echo_warning "Restauração cancelada pelo usuário."
+        return 0
+    fi
+    
+    echo_info "Restaurando $BACKUP em $DB..."
+    docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" psql -U "$PG_USER" -d "$DB" -f "$BACKUP_DIR/$BACKUP"
+    
+    if [ $? -eq 0 ]; then
+        echo_success "Restauração concluída com sucesso"
+        send_webhook "{\"action\":\"Restauração realizada com sucesso\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"database_name\":\"$DB\",\"backup_file\":\"$BACKUP\",\"status\":\"OK\",\"notes\":\"Restauração executada conforme solicitado. Nenhum erro reportado durante o processo.\"}"
+    else
+        echo_error "Falha na restauração"
+        send_webhook "{\"action\":\"Falha na restauração\",\"date\":\"$(date +"%d/%m/%Y %H:%M:%S")\",\"database_name\":\"$DB\",\"backup_file\":\"$BACKUP\",\"status\":\"FAILED\",\"notes\":\"Erro durante o processo de restauração.\"}"
+    fi
+}
 
-echo "Instalação concluída com sucesso!"
-echo "Para restaurar um backup, execute o script restore.sh localizado em $RESTORE_SCRIPT."
+# Exibir menu de opções
+echo_info "Selecione uma opção:"
+echo "1) Realizar backup agora"
+echo "2) Restaurar um backup"
+echo "3) Sair"
+read -p "Escolha [1-3]: " CHOICE
+
+case "$CHOICE" in
+    1)
+        echo_info "Iniciando backup..."
+        for DB in $(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" psql -U "$PG_USER" -tAc "SELECT datname FROM pg_database WHERE datistemplate = false;"); do
+            do_backup "$DB"
+        done
+        ;;
+    2)
+        do_restore
+        ;;
+    3)
+        echo_info "Saindo."
+        exit 0
+        ;;
+    *)
+        echo_error "Opção inválida."
+        exit 1
+        ;;
+esac
+EOF
+    chmod +x "$RESTORE_SCRIPT"
+    echo_success "Script de restauração criado em $RESTORE_SCRIPT"
+
+    # Configurar cron job para backup diário às 00:00
+    echo_info "Configurando cron job para backups diários às 00:00..."
+    (crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT"; echo "0 0 * * * $BACKUP_SCRIPT >> /var/log/backup_postgres_cron.log 2>&1") | crontab -
+    echo_success "Cron job configurado com sucesso."
+
+    # Informar ao usuário sobre os scripts criados
+    echo_info "Configuração concluída com sucesso!"
+    echo_info "Comandos disponíveis:"
+    echo "  Realizar backup manualmente: $BACKUP_SCRIPT"
+    echo "  Restaurar um backup: $RESTORE_SCRIPT"
+
+    # Perguntar se deseja executar o backup imediatamente
+    read -p "Deseja executar um backup agora? (yes/no): " DO_BACKUP
+    if [[ "$DO_BACKUP" =~ ^(yes|Yes|YES)$ ]]; then
+        echo_info "Executando backup..."
+        "$BACKUP_SCRIPT"
+    fi
+}
+
+# Executar função principal
+main "$@"
