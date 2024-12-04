@@ -6,7 +6,7 @@ BACKUP_SCRIPT="$INSTALL_DIR/backup.sh"
 RESTORE_SCRIPT="$INSTALL_DIR/restore.sh"
 ENV_FILE="$INSTALL_DIR/.env"
 
-# Função para verificar se o comando existe
+# Função para verificar se um comando existe
 command_exists () {
     command -v "$1" >/dev/null 2>&1 ;
 }
@@ -50,7 +50,7 @@ POSTGRES_HOST="$POSTGRES_HOST"
 POSTGRES_PORT="$POSTGRES_PORT"
 RETENTION_DAYS=$RETENTION_DAYS
 BACKUP_DIR="$INSTALL_DIR/backups"
-EOL
+EOF
 
     echo ".env configurado com sucesso."
 else
@@ -87,9 +87,17 @@ BACKUP_FILE="backup_${CURRENT_DATE}.backup"
 # Caminho completo do arquivo de backup
 BACKUP_PATH="$BACKUP_DIR/$BACKUP_FILE"
 
+# Identificar o container do PostgreSQL
+CONTAINER_NAME=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}" | head -n 1)
+
+if [ -z "$CONTAINER_NAME" ]; then
+    echo "Nenhum container PostgreSQL encontrado."
+    exit 1
+fi
+
 # Realizar o backup
 echo "Iniciando backup do banco de dados PostgreSQL..."
-docker exec -t $(docker ps --filter ancestor=postgres --format "{{.Names}}") pg_dumpall -U "$POSTGRES_USER" -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" > "$BACKUP_PATH"
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$CONTAINER_NAME" pg_dumpall -U "$POSTGRES_USER" > "$BACKUP_PATH"
 
 if [ $? -ne 0 ]; then
     echo "Falha no backup do banco de dados."
@@ -106,47 +114,65 @@ BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
 
 # Gerenciar retenção de backups
 echo "Gerenciando retenção de backups. Mantendo os últimos $RETENTION_DAYS dias..."
-find "$BACKUP_DIR" -type f -name "backup_*.backup" -mtime +$RETENTION_DAYS -print -exec rm {} \;
-
-# Informações sobre backups deletados
 DELETED_BACKUPS=$(find "$BACKUP_DIR" -type f -name "backup_*.backup" -mtime +$RETENTION_DAYS)
 
-# Enviar notificação via webhook
-echo "Enviando notificação via webhook..."
-PAYLOAD=$(jq -n \
-    --arg action "Backup realizado com sucesso" \
-    --arg date "$(date +"%d/%m/%Y %H:%M:%S")" \
-    --arg database_name "$POSTGRES_USER" \
-    --arg backup_file "$BACKUP_FILE" \
-    --arg backup_size "$BACKUP_SIZE" \
-    --arg retention_days "$RETENTION_DAYS" \
-    --arg status "$STATUS" \
-    --arg notes "$NOTES" \
-    '{
-        action: $action,
-        date: $date,
-        database_name: $database_name,
-        backup_file: $backup_file,
-        backup_size: $backup_size,
-        retention_days: ($retention_days | tonumber),
-        status: $status,
-        notes: $notes
-    }')
-
-# Adicionar informação de backups deletados, se houver
 if [ -n "$DELETED_BACKUPS" ]; then
     for backup in $DELETED_BACKUPS; do
         BACKUP_NAME=$(basename "$backup")
-        DELETION_REASON="Prazo de retenção expirado"
-        DELETED_JSON=$(jq -n \
+        rm "$backup"
+        DELETED_JSON+="$(jq -n \
             --arg backup_name "$BACKUP_NAME" \
-            --arg deletion_reason "$DELETION_REASON" \
-            '{
-                backup_name: $backup_name,
-                deletion_reason: $deletion_reason
-            }')
-        PAYLOAD=$(echo "$PAYLOAD" | jq --argjson deleted_backup "$DELETED_JSON" '. + {deleted_backup: $deleted_backup}')
+            --arg deletion_reason "Prazo de retenção expirado" \
+            '{backup_name: $backup_name, deletion_reason: $deletion_reason}')"
+        DELETED_JSON+=","
     done
+    # Remover a última vírgula
+    DELETED_JSON=${DELETED_JSON%,}
+fi
+
+# Enviar notificação via webhook
+echo "Enviando notificação via webhook..."
+if [ -n "$DELETED_JSON" ]; then
+    PAYLOAD=$(jq -n \
+        --arg action "Backup realizado com sucesso" \
+        --arg date "$(date +"%d/%m/%Y %H:%M:%S")" \
+        --arg database_name "$POSTGRES_USER" \
+        --arg backup_file "$BACKUP_FILE" \
+        --arg backup_size "$BACKUP_SIZE" \
+        --argjson retention_days "$RETENTION_DAYS" \
+        --arg status "$STATUS" \
+        --arg notes "$NOTES" \
+        '{
+            action: $action,
+            date: $date,
+            database_name: $database_name,
+            backup_file: $backup_file,
+            backup_size: $backup_size,
+            retention_days: $retention_days,
+            status: $status,
+            notes: $notes
+        }' \
+        | jq --argjson deleted_backup "[$DELETED_JSON]" '. + {deleted_backup: $deleted_backup}')
+else
+    PAYLOAD=$(jq -n \
+        --arg action "Backup realizado com sucesso" \
+        --arg date "$(date +"%d/%m/%Y %H:%M:%S")" \
+        --arg database_name "$POSTGRES_USER" \
+        --arg backup_file "$BACKUP_FILE" \
+        --arg backup_size "$BACKUP_SIZE" \
+        --argjson retention_days "$RETENTION_DAYS" \
+        --arg status "$STATUS" \
+        --arg notes "$NOTES" \
+        '{
+            action: $action,
+            date: $date,
+            database_name: $database_name,
+            backup_file: $backup_file,
+            backup_size: $backup_size,
+            retention_days: $retention_days,
+            status: $status,
+            notes: $notes
+        }')
 fi
 
 curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL"
@@ -176,31 +202,54 @@ BACKUP_DIR="$BACKUP_DIR"
 
 # Listar backups disponíveis
 echo "Listando backups disponíveis:"
-BACKUPS=($(ls "$BACKUP_DIR"/backup_*.backup 2>/dev/null | sort -r))
+mapfile -t BACKUPS < <(ls "$BACKUP_DIR"/backup_*.backup 2>/dev/null | sort -r)
+
 if [ ${#BACKUPS[@]} -eq 0 ]; then
     echo "Nenhum backup encontrado."
     exit 1
 fi
 
-select BACKUP in "${BACKUPS[@]}"; do
-    if [ -n "$BACKUP" ]; then
-        echo "Você selecionou: $(basename "$BACKUP")"
-        break
-    else
-        echo "Seleção inválida."
-    fi
+# Exibir lista enumerada
+for i in "${!BACKUPS[@]}"; do
+    echo "$((i+1))). $(basename "${BACKUPS[$i]}")"
 done
 
+# Selecionar backup
+read -p "Selecione o número do backup que deseja restaurar: " SELECTED
+
+if ! [[ "$SELECTED" =~ ^[0-9]+$ ]]; then
+    echo "Seleção inválida. Por favor, insira um número válido."
+    exit 1
+fi
+
+INDEX=$((SELECTED-1))
+
+if [ "$INDEX" -lt 0 ] || [ "$INDEX" -ge "${#BACKUPS[@]}" ]; then
+    echo "Número de seleção fora do intervalo."
+    exit 1
+fi
+
+SELECTED_BACKUP="${BACKUPS[$INDEX]}"
+SELECTED_BACKUP_NAME=$(basename "$SELECTED_BACKUP")
+
 # Confirmar restauração
-read -p "Tem certeza de que deseja restaurar este backup? Isso substituirá o banco de dados atual. (yes/no): " CONFIRM
+read -p "Tem certeza de que deseja restaurar o backup '$SELECTED_BACKUP_NAME'? Isso substituirá o banco de dados atual. (yes/no): " CONFIRM
 if [ "$CONFIRM" != "yes" ]; then
     echo "Restauração cancelada."
     exit 0
 fi
 
+# Identificar o container do PostgreSQL
+CONTAINER_NAME=$(docker ps --filter "ancestor=postgres" --format "{{.Names}}" | head -n 1)
+
+if [ -z "$CONTAINER_NAME" ]; then
+    echo "Nenhum container PostgreSQL encontrado."
+    exit 1
+fi
+
 # Restaurar o backup
-echo "Iniciando restauração do backup: $(basename "$BACKUP")"
-docker exec -i $(docker ps --filter ancestor=postgres --format "{{.Names}}") psql -U "$POSTGRES_USER" -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" < "$BACKUP"
+echo "Iniciando restauração do backup: $SELECTED_BACKUP_NAME"
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$CONTAINER_NAME" psql -U "$POSTGRES_USER" -d postgres < "$SELECTED_BACKUP"
 
 if [ $? -ne 0 ]; then
     echo "Falha na restauração do banco de dados."
@@ -216,8 +265,8 @@ echo "Script restore.sh criado."
 # Configurar cron job
 CRON_JOB="0 0 * * * $BACKUP_SCRIPT >> $INSTALL_DIR/backup.log 2>&1"
 
-# Adicionar cron job se não existir
-(crontab -l | grep -v -F "$BACKUP_SCRIPT" ; echo "$CRON_JOB") | crontab -
+# Verificar se o cron job já existe
+(crontab -l 2>/dev/null | grep -F "$BACKUP_SCRIPT") && echo "Cron job já está configurado." || (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
 
 echo "Cron job configurado para executar backup.sh diariamente à 00:00."
 
