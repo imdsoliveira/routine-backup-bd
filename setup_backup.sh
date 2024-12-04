@@ -21,6 +21,29 @@ set -e
 set -u
 set -o pipefail
 
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Mensagens de log
+echo_info() {
+    echo -e "${YELLOW}[INFO]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${YELLOW}[INFO]${NC} $1"
+}
+
+echo_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+echo_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+echo_error() {
+    echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${RED}[ERROR]${NC} $1"
+}
+
 # Configurações Globais
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="/root/.pg_backup.env"
@@ -41,25 +64,8 @@ declare -A BACKUP_SIZES
 declare -A BACKUP_FILES
 declare -A DELETED_BACKUPS
 
-# Funções de Utilidade
-function echo_info() {
-    echo -e "\e[34m[INFO]\e[0m $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "\e[34m[INFO]\e[0m $1"
-}
-
-function echo_success() {
-    echo -e "\e[32m[SUCCESS]\e[0m $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "\e[32m[SUCCESS]\e[0m $1"
-}
-
-function echo_warning() {
-    echo -e "\e[33m[WARNING]\e[0m $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "\e[33m[WARNING]\e[0m $1"
-}
-
-function echo_error() {
-    echo -e "\e[31m[ERROR]\e[0m $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "\e[31m[ERROR]\e[0m $1"
-}
-
 # Função para gerenciar rotação de logs
-function rotate_logs() {
+rotate_logs() {
     if [ -f "$LOG_FILE" ]; then
         local log_size
         log_size=$(stat -c%s "$LOG_FILE")
@@ -73,7 +79,7 @@ function rotate_logs() {
 }
 
 # Função para identificar container PostgreSQL
-function detect_postgres_container() {
+detect_postgres_container() {
     local containers
     containers=$(docker ps --format "{{.Names}}" | grep -i postgres || true)
     if [ -z "$containers" ]; then
@@ -97,7 +103,7 @@ function detect_postgres_container() {
 }
 
 # Função para enviar webhook
-function send_webhook() {
+send_webhook() {
     local payload="$1"
     local max_retries=3
     local retry=0
@@ -118,7 +124,7 @@ function send_webhook() {
 }
 
 # Função para carregar ou criar configurações
-function setup_config() {
+setup_config() {
     local CONFIG_EXISTS=false
     local TEMP_ENV_FILE="/tmp/pg_backup.env.tmp"
 
@@ -191,12 +197,16 @@ function setup_config() {
         PG_USER=${PG_USER:-postgres}
         
         # Senha PostgreSQL (visível)
-        read -p "Senha PostgreSQL: " PG_PASSWORD
-        read -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+        read -s -p "Senha PostgreSQL: " PG_PASSWORD
+        echo
+        read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+        echo
         while [ "$PG_PASSWORD" != "$PG_PASSWORD_CONFIRM" ]; do
             echo_warning "As senhas não coincidem. Tente novamente."
-            read -p "Senha PostgreSQL: " PG_PASSWORD
-            read -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+            read -s -p "Senha PostgreSQL: " PG_PASSWORD
+            echo
+            read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
+            echo
         done
         
         # Retenção
@@ -245,7 +255,7 @@ EOF
 }
 
 # Função para verificar e atualizar container PostgreSQL
-function verify_container() {
+verify_container() {
     local current_container="$1"
     
     # Verificar se o container atual ainda existe e está rodando
@@ -264,7 +274,7 @@ function verify_container() {
 }
 
 # Função para garantir que o banco de dados exista
-function ensure_database_exists() {
+ensure_database_exists() {
     local db_name="$1"
     if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
         psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$db_name"; then
@@ -275,7 +285,7 @@ function ensure_database_exists() {
 }
 
 # Função para verificar se o backup é possível (verificar existência do banco)
-function ensure_backup_possible() {
+ensure_backup_possible() {
     local db="$1"
     if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
         psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$db"; then
@@ -286,13 +296,13 @@ function ensure_backup_possible() {
 }
 
 # Função para criar banco de dados se não existir (usada na restauração)
-function create_database_if_not_exists() {
+create_database_if_not_exists() {
     local db_name="$1"
     ensure_database_exists "$db_name"
 }
 
 # Função para analisar e recriar estruturas ausentes
-function analyze_and_recreate_structures() {
+analyze_and_recreate_structures() {
     local DB="$1"
     local BACKUP_FILE="$2"
     echo_info "Analisando estruturas do banco '$DB'..."
@@ -353,7 +363,7 @@ function analyze_and_recreate_structures() {
 }
 
 # Função para mostrar barra de progresso com operação atual
-function show_progress() {
+show_progress() {
     local current=$1
     local total=$2
     local operation="$3"
@@ -373,7 +383,7 @@ function show_progress() {
 }
 
 # Função para preparar arquivo SQL com rastreamento de progresso
-function prepare_sql_with_progress() {
+prepare_sql_with_progress() {
     local input_file="$1"
     local output_file="$2"
     local progress_file="$3"
@@ -406,7 +416,7 @@ function prepare_sql_with_progress() {
 }
 
 # Função para enviar webhook consolidado
-function send_consolidated_webhook() {
+send_consolidated_webhook() {
     local success_count=0
     local error_count=0
     local success_dbs=""
@@ -469,17 +479,20 @@ function send_consolidated_webhook() {
 }
 
 # Função para limpar instalação anterior
-function cleanup_old_installation() {
+cleanup_old_installation() {
     echo_info "Removendo instalação anterior..."
     rm -f /usr/local/bin/pg_backup_manager.sh
     rm -f /usr/local/bin/pg_backup
     rm -f /usr/local/bin/pg_restore_db
     rm -f "$ENV_FILE"
-    echo_success "Limpeza concluída"
+    rm -f /etc/pg_backup.env
+    rm -f "$HOME/.pg_backup.env"
+    rm -rf /var/backups/postgres /var/log/pg_backup
+    echo_success "Instalação antiga removida com sucesso."
 }
 
 # Função principal de backup
-function do_backup() {
+do_backup() {
     rotate_logs
     local TIMESTAMP=$(date +%Y%m%d%H%M%S)
     local databases
@@ -536,7 +549,7 @@ function do_backup() {
 }
 
 # Função principal de restauração
-function do_restore() {
+do_restore() {
     rotate_logs
 
     # Primeiro selecionar o backup
@@ -681,18 +694,8 @@ function do_restore() {
     fi
 }
 
-# Função para limpar instalação anterior
-function cleanup_old_installation() {
-    echo_info "Removendo instalação anterior..."
-    rm -f /usr/local/bin/pg_backup_manager.sh
-    rm -f /usr/local/bin/pg_backup
-    rm -f /usr/local/bin/pg_restore_db
-    rm -f "$ENV_FILE"
-    echo_success "Limpeza concluída"
-}
-
 # Função principal
-function main() {
+main() {
     case "${1:-}" in
         "--backup"|"--restore")
             if [ ! -f "$ENV_FILE" ]; then
