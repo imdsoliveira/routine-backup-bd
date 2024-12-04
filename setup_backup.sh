@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 1.4.3
+# Versão: 1.4.4
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
@@ -14,6 +14,7 @@
 # - Recriação automática de estruturas ausentes
 # - Verificação pré-backup para garantir a existência do banco de dados
 # - Correção na ordem das operações durante a restauração
+# - Função de limpeza para remover instalações anteriores
 # =============================================================================
 
 set -e
@@ -383,6 +384,15 @@ function send_consolidated_webhook() {
     send_webhook "$payload"
 }
 
+# Função para limpar instalação anterior
+function cleanup_old_installation() {
+    echo_info "Removendo instalação anterior..."
+    rm -f /usr/local/bin/pg_backup
+    rm -f /usr/local/bin/pg_restore_db
+    rm -f "$ENV_FILE"
+    echo_success "Limpeza concluída"
+}
+
 # Função principal de backup
 function do_backup() {
     rotate_logs
@@ -578,6 +588,15 @@ function do_restore() {
     fi
 }
 
+# Função para limpar instalação anterior
+function cleanup_old_installation() {
+    echo_info "Removendo instalação anterior..."
+    rm -f /usr/local/bin/pg_backup
+    rm -f /usr/local/bin/pg_restore_db
+    rm -f "$ENV_FILE"
+    echo_success "Limpeza concluída"
+}
+
 # Função principal
 function main() {
     case "${1:-}" in
@@ -597,7 +616,13 @@ function main() {
             source "$ENV_FILE"
             do_restore
             ;;
+        "--clean")
+            cleanup_old_installation
+            ;;
         *)
+            # Limpar instalação anterior primeiro
+            cleanup_old_installation
+
             # Configuração inicial
             setup_config
 
@@ -651,6 +676,7 @@ EOF
             echo_info "Comandos disponíveis:"
             echo "  Backup manual: pg_backup"
             echo "  Restauração: pg_restore_db"
+            echo "  Limpar instalação: pg_backup_manager.sh --clean"
 
             read -p "Deseja executar um backup agora? (yes/no): " do_backup_now
             if [[ "$do_backup_now" =~ ^(yes|y|Y) ]]; then
