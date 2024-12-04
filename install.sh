@@ -42,7 +42,7 @@ if [ ! -f "$ENV_FILE" ]; then
     read -p "Digite a porta do PostgreSQL (ex: 5432): " POSTGRES_PORT
     read -p "Digite o valor de retenção de dias para backups: " RETENTION_DAYS
 
-    cat <<EOL > "$ENV_FILE"
+    cat <<EOF > "$ENV_FILE"
 WEBHOOK_URL="$WEBHOOK_URL"
 POSTGRES_USER="$POSTGRES_USER"
 POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
@@ -117,6 +117,7 @@ echo "Gerenciando retenção de backups. Mantendo os últimos $RETENTION_DAYS di
 DELETED_BACKUPS=$(find "$BACKUP_DIR" -type f -name "backup_*.backup" -mtime +$RETENTION_DAYS)
 
 if [ -n "$DELETED_BACKUPS" ]; then
+    DELETED_JSON=""
     for backup in $DELETED_BACKUPS; do
         BACKUP_NAME=$(basename "$backup")
         rm "$backup"
@@ -268,7 +269,7 @@ CRON_JOB="0 0 * * * $BACKUP_SCRIPT >> $INSTALL_DIR/backup.log 2>&1"
 # Verificar se o cron job já existe
 (crontab -l 2>/dev/null | grep -F "$BACKUP_SCRIPT") && echo "Cron job já está configurado." || (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
 
-echo "Cron job configurado para executar backup.sh diariamente à 00:00."
+echo "Cron job configurado para executar backup.sh diariamente às 00:00."
 
 echo "Instalação concluída com sucesso!"
 echo "Para restaurar um backup, execute o script restore.sh localizado em $RESTORE_SCRIPT."
