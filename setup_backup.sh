@@ -471,6 +471,7 @@ function send_consolidated_webhook() {
 # Função para limpar instalação anterior
 function cleanup_old_installation() {
     echo_info "Removendo instalação anterior..."
+    rm -f /usr/local/bin/pg_backup_manager.sh
     rm -f /usr/local/bin/pg_backup
     rm -f /usr/local/bin/pg_restore_db
     rm -f "$ENV_FILE"
@@ -700,54 +701,52 @@ function main() {
             cleanup_old_installation
             ;;
         *)
+            # Verificar se está sendo executado via link simbólico
+            local script_name
+            script_name=$(basename "$0")
+            case "$script_name" in
+                pg_backup)
+                    action="--backup"
+                    ;;
+                pg_restore_db)
+                    action="--restore"
+                    ;;
+                *)
+                    action=""
+                    ;;
+            esac
+
+            if [ -n "$action" ]; then
+                # Executar backup ou restore diretamente
+                main "$action"
+                exit 0
+            fi
+
             # Limpar instalação anterior primeiro
             cleanup_old_installation
 
             # Configuração inicial
             setup_config
 
-            # Criar scripts de backup/restore
-            echo_info "Configurando scripts de gerenciamento..."
+            # Criar links simbólicos
+            echo_info "Configurando links simbólicos para facilitar o uso..."
 
-            # Script de backup
-            cat > /usr/local/bin/pg_backup <<EOF
-#!/bin/bash
-source "$ENV_FILE"
-LOG_FILE="$LOG_FILE"
-BACKUP_DIR="$BACKUP_DIR"
-TEMP_DIR="$TEMP_DIR"
-MAX_LOG_SIZE="$MAX_LOG_SIZE"
+            # Verificar se os links já existem e remover se necessário
+            if [ -L /usr/local/bin/pg_backup ] || [ -f /usr/local/bin/pg_backup ]; then
+                rm -f /usr/local/bin/pg_backup
+            fi
 
-# Declarar arrays associativos
-declare -A BACKUP_RESULTS
-declare -A BACKUP_SIZES
-declare -A BACKUP_FILES
-declare -A DELETED_BACKUPS
+            if [ -L /usr/local/bin/pg_restore_db ] || [ -f /usr/local/bin/pg_restore_db ]; then
+                rm -f /usr/local/bin/pg_restore_db
+            fi
 
-$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs send_consolidated_webhook ensure_backup_possible ensure_database_exists do_backup analyze_and_recreate_structures show_progress prepare_sql_with_progress)
-do_backup
-EOF
-            chmod +x /usr/local/bin/pg_backup
+            # Criar os links simbólicos
+            ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" /usr/local/bin/pg_backup
+            ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" /usr/local/bin/pg_restore_db
 
-            # Script de restore
-            cat > /usr/local/bin/pg_restore_db <<EOF
-#!/bin/bash
-source "$ENV_FILE"
-LOG_FILE="$LOG_FILE"
-BACKUP_DIR="$BACKUP_DIR"
-TEMP_DIR="$TEMP_DIR"
-MAX_LOG_SIZE="$MAX_LOG_SIZE"
-
-# Declarar arrays associativos
-declare -A BACKUP_RESULTS
-declare -A BACKUP_SIZES
-declare -A BACKUP_FILES
-declare -A DELETED_BACKUPS
-
-$(declare -f echo_info echo_success echo_warning echo_error send_webhook rotate_logs send_consolidated_webhook ensure_backup_possible ensure_database_exists create_database_if_not_exists do_restore analyze_and_recreate_structures show_progress prepare_sql_with_progress)
-do_restore
-EOF
-            chmod +x /usr/local/bin/pg_restore_db
+            echo_success "Links simbólicos criados com sucesso:"
+            echo "  - pg_backup -> /usr/local/bin/pg_backup_manager.sh"
+            echo "  - pg_restore_db -> /usr/local/bin/pg_backup_manager.sh"
 
             # Configurar cron para backup diário às 00:00
             (crontab -l 2>/dev/null | grep -v 'pg_backup'; echo "0 0 * * * /usr/local/bin/pg_backup") | crontab -
@@ -758,6 +757,7 @@ EOF
             echo "  Restauração: pg_restore_db"
             echo "  Limpar instalação: pg_backup_manager.sh --clean"
 
+            # Solicitar execução imediata do backup, se desejado
             read -p "Deseja executar um backup agora? (yes/no): " do_backup_now
             if [[ "$do_backup_now" =~ ^(yes|y|Y) ]]; then
                 do_backup
