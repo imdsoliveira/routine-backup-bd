@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 1.8.0
+# Versão: 1.0.0
 # =============================================================================
 # Funcionalidades:
 # - Detecção automática de contêiner PostgreSQL
@@ -280,7 +280,7 @@ test_database_connection() {
 }
 
 # =============================================================================
-# Verificar e Atualizar Contêiner
+# Verificação e Atualização do Contêiner
 # =============================================================================
 verify_container() {
     local current_container="$1"
@@ -468,7 +468,7 @@ EOF
         payload+=$(cat <<EOF
     {
       "database_name": "$db",
-      "backup_name": "${DELETED_BACKups[$db]}",
+      "backup_name": "${DELETED_BACKUPS[$db]}",
       "deletion_reason": "Prazo de retenção expirado"
     }
 EOF
@@ -592,7 +592,7 @@ restore_partial() {
 restore_database() {
     local db="$1"
     echo_info "Restaurando banco '$db'..."
-    
+
     # Listar backups disponíveis para o banco
     mapfile -t db_backups < <(find "$BACKUP_DIR" -type f -name "postgres_backup_*_${db}.sql.gz" | sort -r)
 
@@ -759,7 +759,7 @@ list_all_backups() {
 show_menu() {
     while true; do
         echo
-        echo "===== PostgreSQL Backup Manager v1.8.0 ====="
+        echo "===== PostgreSQL Backup Manager v1.0.0 ====="
         echo "1. Fazer backup completo"
         echo "2. Fazer backup de bancos específicos"
         echo "3. Restaurar backup"
@@ -827,7 +827,7 @@ install_script() {
 # =============================================================================
 configure_cron() {
     echo_info "Configurando cron job para backup diário às 00:00..."
-    if ! crontab -l 2>/dev/null | grep -q "/usr/local/bin/pg_backup_manager.sh"; then
+    if ! crontab -l 2>/dev/null | grep -q "/usr/local/bin/pg_backup_manager.sh --backup"; then
         (crontab -l 2>/dev/null; echo "0 0 * * * /usr/local/bin/pg_backup_manager.sh --backup") | crontab -
         echo_success "Cron job configurado com sucesso."
     else
@@ -840,7 +840,7 @@ configure_cron() {
 # =============================================================================
 update_script() {
     echo_info "Atualizando script principal..."
-    local latest_script_url="https://raw.githubusercontent.com/seu-usuario/seu-repositorio/main/pg_backup_manager.sh"
+    local latest_script_url="https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/pg_backup_manager.sh"
     if curl -sSL "$latest_script_url" -o "$SCRIPT_DIR/pg_backup_manager.sh"; then
         chmod +x "$SCRIPT_DIR/pg_backup_manager.sh"
         echo_success "Script principal atualizado com sucesso."
