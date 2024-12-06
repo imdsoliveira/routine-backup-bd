@@ -1,9 +1,7 @@
-# bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
-# Necessario "instalar apt-get install postgresql-client-14"
 #!/usr/bin/env bash
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 0.2.1 (atualizada)
+# Versão: 0.2.2 (atualizada)
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
@@ -19,7 +17,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-SCRIPT_VERSION="0.2.1"
+SCRIPT_VERSION="0.2.2"
 BACKUP_BASE_DIR="/root/backups-postgres"
 
 load_env() {
