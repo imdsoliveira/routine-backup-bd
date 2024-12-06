@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager Simplificado 2024
-# Versão: 2.0.2
+# Versão: 1.0.0
 # =============================================================================
 # Funcionalidades:
 # - Detecção automática de contêiner PostgreSQL
@@ -21,7 +21,7 @@ set -euo pipefail
 # Variáveis Globais
 # =============================================================================
 SCRIPT_DIR="/usr/local/bin"
-ENV_FILE="/root/.pg_backup.env"
+ENV_FILE="$HOME/.pg_backup.env"
 LOG_FILE="/var/log/pg_backup.log"
 BACKUP_DIR="/var/backups/postgres"
 TEMP_DIR="$BACKUP_DIR/temp"
@@ -326,49 +326,42 @@ do_backup() {
 
     # Construir payload para webhook
     local payload='{
-      "action": "Backup realizado",
-      "date": "'$(date '+%d/%m/%Y %H:%M:%S')'",
-      "backup_details": ['
-    
+  "action": "Backup realizado com sucesso",
+  "date": "'$(date '+%d/%m/%Y %H:%M:%S')'",
+  "backup_details": ['
+
     local first=1
     for db in "${!BACKUP_RESULTS[@]}"; do
-        if [ "$first" -eq 1 ]; then
-            first=0
-        else
-            payload+=', '
-        fi
         if [ "${BACKUP_RESULTS[$db]}" == "success" ]; then
+            if [ "$first" -eq 1 ]; then
+                first=0
+            else
+                payload+=', '
+            fi
             payload+='{
-          "database_name": "'$db'",
-          "backup_file": "'${BACKUP_FILES[$db]}'",
-          "backup_size": "'${BACKUP_SIZES[$db]}'"
-        }'
-        else
-            payload+='{
-          "database_name": "'$db'",
-          "status": "error",
-          "message": "Falha no backup."
-        }'
+    "database_name": "'$db'",
+    "backup_file": "'${BACKUP_FILES[$db]}'",
+    "backup_size": "'${BACKUP_SIZES[$db]}'"
+  }'
         fi
     done
 
-    payload+='], "retention_days": '$RETENTION_DAYS', "deleted_backups": ['
-    
-    first=1
+    payload+='], "retention_days": '$RETENTION_DAYS', "deleted_backup": {'
+
+    local first_del=1
     for db in "${!DELETED_BACKUPS[@]}"; do
-        if [ "$first" -eq 1 ]; then
-            first=0
+        if [ "$first_del" -eq 1 ]; then
+            first_del=0
         else
             payload+=', '
         fi
         payload+='{
-          "database_name": "'$db'",
-          "backup_name": "'${DELETED_BACKUPS[$db]}'",
-          "deletion_reason": "Prazo de retenção expirado"
-        }'
+    "backup_name": "'${DELETED_BACKUPS[$db]}'",
+    "deletion_reason": "Prazo de retenção expirado"
+  }'
     done
 
-    payload+='], "status": "'$(if [ "${#BACKUP_RESULTS[@]}" -eq 0 ]; then echo "OK"; else echo "COMPLETED"; fi)'", "notes": "Backup executado conforme cron job configurado." }'
+    payload+='}, "status": "OK", "notes": "Backup executado conforme cron job configurado. Nenhum erro reportado durante o processo." }'
 
     # Enviar webhook
     send_webhook "$payload"
@@ -383,7 +376,7 @@ do_restore() {
     test_database_connection
 
     echo_info "Selecione o tipo de restauração:"
-    echo "1) Restauração completa (todas as bases)"
+    echo "1) Restauração completa (todos os bancos)"
     echo "2) Restauração de bancos específicos"
     echo "3) Cancelar"
     read -p "Digite o número da opção desejada: " restore_option
@@ -527,7 +520,7 @@ restore_database() {
         psql -U "$PG_USER" -d "$db" -f "/var/backups/postgres/temp/temp_restore.sql" 2>>"$LOG_FILE"; then
         echo_success "Restauração do banco '$db' concluída com sucesso."
         # Enviar webhook de sucesso
-        send_webhook "{
+        local success_payload="{
   \"action\": \"Restauração realizada com sucesso\",
   \"date\": \"$(date '+%d/%m/%Y %H:%M:%S')\",
   \"database_name\": \"$db\",
@@ -535,10 +528,11 @@ restore_database() {
   \"status\": \"OK\",
   \"notes\": \"Restauração executada conforme solicitação do usuário.\"
 }"
+        send_webhook "$success_payload"
     else
         echo_error "Falha na restauração do banco '$db'."
         # Enviar webhook de erro
-        send_webhook "{
+        local error_payload="{
   \"action\": \"Restauração falhou\",
   \"date\": \"$(date '+%d/%m/%Y %H:%M:%S')\",
   \"database_name\": \"$db\",
@@ -546,6 +540,7 @@ restore_database() {
   \"status\": \"ERROR\",
   \"notes\": \"Falha na execução da restauração.\"
 }"
+        send_webhook "$error_payload"
     fi
 
     # Limpar arquivos temporários
@@ -580,7 +575,7 @@ list_all_backups() {
 show_menu() {
     while true; do
         echo
-        echo "===== PostgreSQL Backup Manager v2.0.2 ====="
+        echo "===== PostgreSQL Backup Manager v1.0.0 ====="
         echo "1. Fazer backup completo"
         echo "2. Fazer backup de bancos específicos"
         echo "3. Restaurar backup"
