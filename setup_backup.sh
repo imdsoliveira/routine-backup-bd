@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 1.4.1
+# Versão: 0.1.1
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
@@ -21,7 +21,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # Sem cor
 
-SCRIPT_VERSION="1.4.1"
+SCRIPT_VERSION="0.1.1"
 BACKUP_BASE_DIR="/root/backups-postgres"
 
 # Função para carregar variáveis de ambiente do .env se existir
