@@ -1,3 +1,4 @@
+# README
 # PostgreSQL Backup Manager 2024 - Versão 1.4.4
 
 ## Funcionalidades Incluídas:
@@ -35,7 +36,7 @@ bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-b
 ## Ou em um único comando:
 
 ```shell
-curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh | bash -s -- --clean && bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh) | bash -s -- --clean && bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
 ```
 
 ## Backup manual
