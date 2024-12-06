@@ -48,3 +48,9 @@ psql (PostgreSQL) 15.x
 ```bash
 bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
 ```
+
+# Configurar o Script Atualizado
+
+```bash
+./setup_backup.sh --setup
+```

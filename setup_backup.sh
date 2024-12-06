@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 0.2.2 (atualizada)
+# Versão: 0.3.0 (atualizada)
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
@@ -9,6 +9,7 @@
 # - Restauração interativa
 # - Criação de bancos ausentes na restauração
 # - Logs e feedback no terminal com cores
+# - Verificação e configuração automática de cron
 # =============================================================================
 
 RED='\033[0;31m'
@@ -17,8 +18,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-SCRIPT_VERSION="0.2.2"
+SCRIPT_VERSION="0.3.0"
 BACKUP_BASE_DIR="/root/backups-postgres"
+SCRIPT_PATH="$(readlink -f "$0")" # Caminho completo do script
+CRON_JOB="0 0 * * * $SCRIPT_PATH --auto-backup >> /var/log/postgres_backup.log 2>&1"
 
 load_env() {
     if [ -f .env ]; then
@@ -29,10 +32,10 @@ load_env() {
 }
 
 check_requirements() {
-    # Verificar se psql e pg_dump estão instalados
-    command -v psql >/dev/null 2>&1 || { echo -e "${RED}psql não encontrado. Instale com: apt-get install postgresql-client-${NC}"; exit 1; }
+    command -v psql >/dev/null 2>&1 || { echo -e "${RED}psql não encontrado. Instale com: apt-get install postgresql-client${NC}"; exit 1; }
     command -v pg_dump >/dev/null 2>&1 || { echo -e "${RED}pg_dump não encontrado. Instale o cliente PostgreSQL apropriado.${NC}"; exit 1; }
     command -v pg_restore >/dev/null 2>&1 || { echo -e "${RED}pg_restore não encontrado. Instale o cliente PostgreSQL apropriado.${NC}"; exit 1; }
+    command -v crontab >/dev/null 2>&1 || { echo -e "${RED}crontab não encontrado. Instale com: apt-get install cron${NC}"; exit 1; }
 }
 
 setup_env() {
@@ -85,7 +88,45 @@ check_version_compatibility() {
     if [ "$SERVER_MAJOR" != "$CLIENT_MAJOR" ]; then
         echo -e "${YELLOW}ATENÇÃO: Versão do servidor ($SERVER_VERSION) difere da versão do pg_dump ($CLIENT_VERSION).${NC}"
         echo -e "${YELLOW}Isso pode causar erros no backup. Recomenda-se instalar o cliente compatível:${NC}"
-        echo -e "${YELLOW}Ex: apt-get install postgresql-client-$SERVER_MAJOR (após adicionar repositório PGDG se necessário)${NC}"
+        echo -e "${YELLOW}Ex: apt-get install postgresql-client-$SERVER_MAJOR${NC}"
+    fi
+}
+
+check_and_setup_cron() {
+    # Verifica se a linha do cron existe
+    current_cron=$(crontab -l 2>/dev/null)
+    echo "$current_cron" | grep --silent "$SCRIPT_PATH --auto-backup"
+    if [ $? -ne 0 ]; then
+        # Cron job não encontrado
+        echo -e "${YELLOW}Cron job para backup automático não encontrado.${NC}"
+        read -p "Deseja configurar o backup automático diário (s/n)? " cron_choice
+        if [ "$cron_choice" == "s" ]; then
+            new_cron="$current_cron
+$CRON_JOB"
+            # Remove linhas em branco extras
+            new_cron=$(echo "$new_cron" | sed '/^\s*$/d')
+            echo "$new_cron" | crontab -
+            echo -e "${GREEN}Cron job configurado com sucesso!${NC}"
+        else
+            echo -e "${YELLOW}Backup automático não configurado.${NC}"
+        fi
+    else
+        # Já existe uma entrada com --auto-backup
+        # Verifica se está correta (mesmo horário e caminho)
+        echo "$current_cron" | grep --silent "^0 0 \* \* \* $SCRIPT_PATH --auto-backup"
+        if [ $? -ne 0 ]; then
+            # Linha existe, mas não está exata. Vamos corrigir.
+            echo -e "${YELLOW}Entrada do cron encontrada, mas difere do esperado. Corrigindo...${NC}"
+            # Remove entradas antigas com --auto-backup
+            updated_cron=$(echo "$current_cron" | grep -v "$SCRIPT_PATH --auto-backup")
+            updated_cron="$updated_cron
+$CRON_JOB"
+            updated_cron=$(echo "$updated_cron" | sed '/^\s*$/d')
+            echo "$updated_cron" | crontab -
+            echo -e "${GREEN}Cron job atualizado com sucesso!${NC}"
+        else
+            echo -e "${GREEN}Cron job já está corretamente configurado.${NC}"
+        fi
     fi
 }
 
@@ -354,6 +395,7 @@ main_menu() {
 
 load_env
 check_requirements
+check_and_setup_cron
 
 if [ "$1" == "--setup" ]; then
     setup_env
