@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 0.2.0
+# Versão: 0.2.1 (atualizada)
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
-# - Notificações webhook
+# - Notificações via webhook
 # - Restauração interativa
-# - Detecção (opcional) do container PostgreSQL
 # - Criação de bancos ausentes na restauração
 # - Logs e feedback no terminal com cores
 # =============================================================================
@@ -18,7 +17,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.2.1"
 BACKUP_BASE_DIR="/root/backups-postgres"
 
 load_env() {
@@ -29,8 +28,16 @@ load_env() {
     fi
 }
 
+check_requirements() {
+    # Verificar se psql e pg_dump estão instalados
+    command -v psql >/dev/null 2>&1 || { echo -e "${RED}psql não encontrado. Instale com: apt-get install postgresql-client-${NC}"; exit 1; }
+    command -v pg_dump >/dev/null 2>&1 || { echo -e "${RED}pg_dump não encontrado. Instale o cliente PostgreSQL apropriado.${NC}"; exit 1; }
+    command -v pg_restore >/dev/null 2>&1 || { echo -e "${RED}pg_restore não encontrado. Instale o cliente PostgreSQL apropriado.${NC}"; exit 1; }
+}
+
 setup_env() {
     echo -e "${BLUE}==== Configuração Inicial do PostgreSQL Backup Manager ====${NC}"
+    echo -e "${YELLOW}Se o Postgres estiver na mesma máquina, utilize 'localhost' como host para evitar problemas com IP público.${NC}"
     read -p "Digite a URL do Webhook (atual: ${WEBHOOK_URL:-não definido}): " input_url
     [ ! -z "$input_url" ] && WEBHOOK_URL="$input_url"
 
@@ -39,12 +46,6 @@ setup_env() {
 
     read -p "Digite quantos dias de retenção deseja (atual: ${retention_days_value:-7}): " input_ret
     [ ! -z "$input_ret" ] && retention_days_value="$input_ret" || retention_days_value=7
-
-    # Tentativa de detecção automática do host (opcional)
-    # HOST_DETECTED=$(hostname -I | awk '{print $1}')
-    # Caso queira usar detecção automática, descomente acima e use:
-    # read -p "Digite o host do Postgres (atual: ${POSTGRES_HOST:-$HOST_DETECTED}): " input_host
-    # [ ! -z "$input_host" ] && POSTGRES_HOST="$input_host" || POSTGRES_HOST="$HOST_DETECTED"
 
     read -p "Digite o host do Postgres (atual: ${POSTGRES_HOST:-localhost}): " input_host
     [ ! -z "$input_host" ] && POSTGRES_HOST="$input_host" || POSTGRES_HOST="localhost"
@@ -67,22 +68,24 @@ test_connection() {
     export PGPASSWORD="$POSTGRES_PASSWORD"
     pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U postgres > /dev/null 2>&1
     if [ $? -ne 0 ]; then
-        echo -e "${RED}Falha ao conectar no Postgres. Verifique as credenciais e o host.${NC}"
+        echo -e "${RED}Falha ao conectar no Postgres. Verifique as credenciais, o host e a porta.${NC}"
         exit 1
     fi
 }
 
 check_version_compatibility() {
-    # Testa a compatibilidade de versão entre o pg_dump local e o servidor
-    SERVER_VERSION=$(psql -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -tAc "SHOW server_version")
+    SERVER_VERSION=$(psql -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -tAc "SHOW server_version" 2>/dev/null)
+    if [ -z "$SERVER_VERSION" ]; then
+        echo -e "${RED}Não foi possível obter a versão do servidor. Verifique se as credenciais e o host estão corretos.${NC}"
+        exit 1
+    fi
     CLIENT_VERSION=$(pg_dump --version | awk '{print $3}')
-    # Comparar apenas o número principal da versão
     SERVER_MAJOR=$(echo $SERVER_VERSION | cut -d '.' -f1)
     CLIENT_MAJOR=$(echo $CLIENT_VERSION | cut -d '.' -f1)
     if [ "$SERVER_MAJOR" != "$CLIENT_MAJOR" ]; then
         echo -e "${YELLOW}ATENÇÃO: Versão do servidor ($SERVER_VERSION) difere da versão do pg_dump ($CLIENT_VERSION).${NC}"
         echo -e "${YELLOW}Isso pode causar erros no backup. Recomenda-se instalar o cliente compatível:${NC}"
-        echo -e "${YELLOW}Ex: apt-get install postgresql-client-$SERVER_MAJOR${NC}"
+        echo -e "${YELLOW}Ex: apt-get install postgresql-client-$SERVER_MAJOR (após adicionar repositório PGDG se necessário)${NC}"
     fi
 }
 
@@ -126,7 +129,9 @@ send_webhook_notification() {
 }
 EOF
 )
-    curl -s -X POST -H "Content-Type: application/json" -d "$json_payload" "$WEBHOOK_URL" > /dev/null
+    if [ ! -z "$WEBHOOK_URL" ]; then
+        curl -s -X POST -H "Content-Type: application/json" -d "$json_payload" "$WEBHOOK_URL" > /dev/null
+    fi
 }
 
 full_backup() {
@@ -262,8 +267,7 @@ restore_backup() {
         send_webhook_notification "Restauração realizada com sucesso" "$(date +"%d/%m/%Y %H:%M:%S")" "todos_os_bancos" "backup_completo_${selected_backup}.sql" "$(get_file_size "$FULL_BACKUP_FILE")" "" ""
     else
         echo -e "${RED}Arquivo de backup completo não encontrado para o backup selecionado.${NC}"
-        echo -e "${YELLOW}Possíveis causas:${NC}"
-        echo -e "${YELLOW}- O backup completo falhou no momento da criação.${NC}"
+        echo -e "${YELLOW}- Possíveis causas: O backup completo não foi criado ou falhou.${NC}"
         echo -e "${YELLOW}- Utilize a restauração de bancos específicos (opção 4) se o backup individual existir.${NC}"
     fi
 }
@@ -349,6 +353,7 @@ main_menu() {
 }
 
 load_env
+check_requirements
 
 if [ "$1" == "--setup" ]; then
     setup_env
