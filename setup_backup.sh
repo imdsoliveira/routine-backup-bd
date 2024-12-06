@@ -23,6 +23,8 @@ set -e
 set -u
 set -o pipefail
 
+VERSION="1.7.0"
+
 # Cores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -389,7 +391,6 @@ analyze_and_recreate_structures() {
 ###############################################################################
 choose_backup_for_db() {
     local db="$1"
-    # Listar todos os backups disponíveis para este db
     local db_backups=($(find "$BACKUP_DIR" -type f -name "postgres_backup_*_${db}.sql.gz" | sort -r))
     if [ ${#db_backups[@]} -eq 0 ]; then
         echo_error "Nenhum backup encontrado para o banco '$db'."
@@ -484,7 +485,8 @@ do_backup_databases() {
             gzip -f "$BACKUP_PATH"
             BACKUP_PATH="${BACKUP_PATH}.gz"
 
-            local BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
+            local BACKUP_SIZE
+            BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
             echo_success "Backup concluído: $(basename "$BACKUP_PATH") (Tamanho: $BACKUP_SIZE)"
 
             BACKUP_RESULTS[$db]="success"
@@ -585,14 +587,12 @@ do_restore_databases() {
 
     local mode="$1"
 
-    # Listar todos os backups disponíveis
     local all_backups=($(find "$BACKUP_DIR" -type f -name "postgres_backup_*.sql.gz" | sort -r))
     if [ ${#all_backups[@]} -eq 0 ]; then
         echo_error "Nenhum backup encontrado para restauração."
         return 1
     fi
 
-    # Obter lista de todos os bancos com backups
     declare -A DB_WITH_BACKUPS
     for bkp in "${all_backups[@]}"; do
         local db_name
@@ -634,7 +634,6 @@ do_restore_databases() {
     local error_count=0
 
     for db in "${selected_databases[@]}"; do
-        # Escolher qual backup usar para este DB
         local chosen_backup
         chosen_backup=$(choose_backup_for_db "$db") || { BACKUP_RESULTS[$db]="error"; error_count=$((error_count+1)); continue; }
 
@@ -647,11 +646,9 @@ do_restore_databases() {
 
         analyze_and_recreate_structures "$db" "$BACKUP_DIR/temp_restore.sql"
 
-        # Dropar conexões existentes
         docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
             psql -U "$PG_USER" -d "$db" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$db' AND pid <> pg_backend_pid();" >/dev/null 2>&1
 
-        # Restaurar diretamente (sem barra de progresso)
         if docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
             psql -U "$PG_USER" -d "$db" -f "/var/backups/postgres/temp_restore.sql" 2>>"$LOG_FILE"; then
             echo_success "Restauração do banco '$db' concluída com sucesso."
@@ -778,7 +775,7 @@ update_script() {
 show_menu() {
     while true; do
         echo
-        echo "===== PostgreSQL Backup Manager ====="
+        echo "===== PostgreSQL Backup Manager v${VERSION} ====="
         echo "1. Fazer backup completo"
         echo "2. Fazer backup de bancos específicos"
         echo "3. Restaurar backup completo"

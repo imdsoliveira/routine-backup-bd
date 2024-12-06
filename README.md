@@ -62,3 +62,43 @@ pg_backup_manager.sh --clean
 ```shell
 ```
 
+# Instruções Complementares
+## Primeira Execução:
+
+```shell
+bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
+```
+Siga as instruções para configurar usuário, senha (visível), retenção e webhook.
+
+Menu Interativo:
+Após a configuração, o menu aparecerá a cada execução do script sem parâmetros.
+
+Backup Completo: backup de todos os bancos.
+Backup Parcial: escolher quais bancos backupear.
+Restauração Completa: listar todos os bancos com backups, restaurar todos, escolhendo qual backup por banco.
+Restauração Parcial: escolher quais bancos restaurar e qual backup de cada um.
+Atualizar Configurações: alterar usuário, senha, retenção, webhook.
+Sair: sair do script.
+Conexão com Banco: Antes de qualquer backup ou restauração, o script testa a conexão. Se falhar, interrompe o processo.
+
+Senhas Visíveis: A senha do PostgreSQL é digitada de forma visível no terminal, conforme solicitado.
+
+Sem Barra de Progresso na Restauração: Restauração é feita diretamente, evitando problemas de sintaxe.
+
+Escolha do Backup na Restauração: Ao restaurar um banco, todos os backups encontrados para aquele banco são listados, permitindo escolher qual backup restaurar.
+
+Limpeza da Instalação:
+
+bash
+Copiar código
+pg_backup_manager.sh --clean
+Atualização:
+
+bash
+Copiar código
+pg_backup_manager.sh --update
+Configuração:
+
+bash
+Copiar código
+pg_backup_manager.sh --configure
