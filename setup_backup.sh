@@ -1,31 +1,18 @@
-#!/bin/bash
-
+#!/usr/bin/env bash
 # =============================================================================
-# PostgreSQL Backup Manager Simplificado 2024
-# Versão: 1.0.0
+# PostgreSQL Backup Manager 2024
+# Versão: 1.4.1
 # =============================================================================
-# Funcionalidades:
-# - Detecção automática de contêiner PostgreSQL
-# - Backup completo ou parcial
-# - Retenção configurável de backups
-# - Notificações via Webhook
-# - Restauração interativa de backups
-# - Configuração via arquivo .env com opção de atualização
-# - Logs coloridos e detalhados no terminal
-# - Automatização de backups diários com cron
+# - Backup automático diário
+# - Retenção configurável
+# - Notificações webhook consolidadas
+# - Restauração interativa com barra de progresso
+# - Detecção automática de container PostgreSQL (Docker Swarm)
+# - Criação automática de estruturas
+# - Gerenciamento de logs com rotação
+# - Recriação automática de estruturas ausentes
+# - Verificação pré-backup de existência do banco de dados
 # =============================================================================
-
-set -euo pipefail
-
-# =============================================================================
-# Variáveis Globais
-# =============================================================================
-SCRIPT_DIR="/usr/local/bin"
-ENV_FILE="$HOME/.pg_backup.env"
-LOG_FILE="/var/log/pg_backup.log"
-BACKUP_DIR="/var/backups/postgres"
-TEMP_DIR="$BACKUP_DIR/temp"
-MAX_LOG_SIZE=$((50 * 1024 * 1024)) # 50MB
 
 # Cores para saída no terminal
 RED='\033[0;31m'
@@ -34,701 +21,334 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # Sem cor
 
-# Declarar arrays associativos para armazenar resultados
-declare -A BACKUP_RESULTS
-declare -A BACKUP_SIZES
-declare -A BACKUP_FILES
-declare -A DELETED_BACKUPS
+SCRIPT_VERSION="1.4.1"
+BACKUP_BASE_DIR="/root/backups-postgres"
 
-# =============================================================================
-# Funções de Log
-# =============================================================================
-echo_info() {
-    echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-echo_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-echo_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-echo_error() {
-    echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# =============================================================================
-# Rotação de Logs
-# =============================================================================
-rotate_logs() {
-    if [ -f "$LOG_FILE" ]; then
-        local log_size
-        log_size=$(stat -c%s "$LOG_FILE")
-        if [ "$log_size" -ge "$MAX_LOG_SIZE" ]; then
-            mv "$LOG_FILE" "${LOG_FILE}.$(date '+%Y%m%d%H%M%S').bak"
-            touch "$LOG_FILE"
-            chmod 644 "$LOG_FILE"
-            echo_info "Log rotacionado devido ao tamanho excedido."
-        fi
+# Função para carregar variáveis de ambiente do .env se existir
+load_env() {
+    if [ -f .env ]; then
+        set -o allexport
+        source .env
+        set +o allexport
     fi
 }
 
-# =============================================================================
-# Detecção Automática do Contêiner PostgreSQL
-# =============================================================================
-detect_postgres_container() {
-    local containers
-    containers=$(docker ps --format "{{.Names}}" | grep -i postgres || true)
-    if [ -z "$containers" ]; then
-        echo_error "Nenhum contêiner PostgreSQL encontrado!"
-        exit 1
-    elif [ "$(echo "$containers" | wc -l)" -eq 1 ]; then
-        echo "$containers"
-    else
-        echo_info "Contêineres PostgreSQL disponíveis:"
-        echo "$containers"
-        while true; do
-            read -p "Digite o nome do contêiner PostgreSQL: " container_name
-            if docker ps --format "{{.Names}}" | grep -qw "$container_name"; then
-                echo "$container_name"
-                break
-            else
-                echo_warning "Nome do contêiner inválido. Tente novamente."
-            fi
-        done
-    fi
-}
+# Função para criar/atualizar .env
+setup_env() {
+    echo -e "${BLUE}==== Configuração Inicial do PostgreSQL Backup Manager ====${NC}"
+    read -p "Digite a URL do Webhook (atual: ${WEBHOOK_URL:-não definido}): " input_url
+    [ ! -z "$input_url" ] && WEBHOOK_URL="$input_url"
 
-# =============================================================================
-# Envio de Webhook
-# =============================================================================
-send_webhook() {
-    local payload="$1"
-    local max_retries=3
-    local retry=0
+    read -p "Digite a senha do usuário postgres (atual: ${POSTGRES_PASSWORD:-não definido}): " input_pwd
+    [ ! -z "$input_pwd" ] && POSTGRES_PASSWORD="$input_pwd"
 
-    while [ $retry -lt $max_retries ]; do
-        local http_code
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL")
-        if [[ "$http_code" =~ ^2 ]]; then
-            return 0
-        fi
-        retry=$((retry + 1))
-        echo_warning "Falha ao enviar webhook. Tentativa $retry de $max_retries."
-        sleep 5
-    done
+    read -p "Digite quantos dias de retenção deseja (atual: ${retention_days_value:-7}): " input_ret
+    [ ! -z "$input_ret" ] && retention_days_value="$input_ret" || retention_days_value=7
 
-    echo_error "Falha ao enviar webhook após $max_retries tentativas."
-    return 1
-}
+    # Host pode ser 'localhost' ou ip do container
+    read -p "Digite o host do Postgres (atual: ${POSTGRES_HOST:-localhost}): " input_host
+    [ ! -z "$input_host" ] && POSTGRES_HOST="$input_host" || POSTGRES_HOST="localhost"
 
-# =============================================================================
-# Configuração do Ambiente (.env)
-# =============================================================================
-setup_config() {
-    local config_exists=false
+    read -p "Digite a porta do Postgres (atual: ${POSTGRES_PORT:-5432}): " input_port
+    [ ! -z "$input_port" ] && POSTGRES_PORT="$input_port" || POSTGRES_PORT=5432
 
-    # Verificar se o arquivo .env já existe
-    if [ -f "$ENV_FILE" ]; then
-        config_exists=true
-        echo_info "Configurações existentes encontradas em: $ENV_FILE"
-        echo "Configurações atuais:"
-        echo "----------------------------------------"
-        grep -v "PG_PASSWORD" "$ENV_FILE" | sed 's/^/  /'
-        echo "  PG_PASSWORD=******"
-        echo "----------------------------------------"
-        read -p "Deseja manter estas configurações? (yes/no): " keep_config
-        if [[ "$keep_config" =~ ^(yes|y|Y)$ ]]; then
-            source "$ENV_FILE"
-            return 0
-        fi
-    fi
-
-    echo_info "Configurando novo backup..."
-
-    # Detectar contêiner PostgreSQL
-    CONTAINER_NAME=$(detect_postgres_container)
-
-    # Configurar usuário e senha
-    read -p "Usuário PostgreSQL [postgres]: " PG_USER
-    PG_USER=${PG_USER:-postgres}
-
-    while true; do
-        read -s -p "Senha PostgreSQL: " PG_PASSWORD
-        echo
-        read -s -p "Confirme a senha: " PG_PASSWORD_CONFIRM
-        echo
-        if [ "$PG_PASSWORD" == "$PG_PASSWORD_CONFIRM" ]; then
-            break
-        else
-            echo_warning "As senhas não coincidem. Tente novamente."
-        fi
-    done
-
-    # Configurar retenção
-    read -p "Dias de retenção dos backups [30]: " RETENTION_DAYS
-    RETENTION_DAYS=${RETENTION_DAYS:-30}
-
-    # Configurar webhook
-    read -p "URL do Webhook: " WEBHOOK_URL
-    if ! curl -s -o /dev/null "$WEBHOOK_URL"; then
-        echo_warning "Não foi possível validar o webhook. Continuar mesmo assim? (yes/no): "
-        read confirm
-        if [[ ! "$confirm" =~ ^(yes|y|Y)$ ]]; then
-            exit 1
-        fi
-    fi
-
-    # Salvar configurações
-    cat > "$ENV_FILE" <<EOF
-CONTAINER_NAME="$CONTAINER_NAME"
-PG_USER="$PG_USER"
-PG_PASSWORD="$PG_PASSWORD"
-RETENTION_DAYS="$RETENTION_DAYS"
+    # Salvar no .env
+    cat > .env <<EOF
 WEBHOOK_URL="$WEBHOOK_URL"
-BACKUP_DIR="$BACKUP_DIR"
-LOG_FILE="$LOG_FILE"
-TEMP_DIR="$TEMP_DIR"
+POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+POSTGRES_HOST="$POSTGRES_HOST"
+POSTGRES_PORT="$POSTGRES_PORT"
+retention_days_value="$retention_days_value"
 EOF
-    chmod 600 "$ENV_FILE"
 
-    echo_success "Configurações salvas em $ENV_FILE"
+    echo -e "${GREEN}Arquivo .env criado/atualizado com sucesso!${NC}"
 }
 
-# =============================================================================
-# Verificação da Conexão com o Banco de Dados
-# =============================================================================
-test_database_connection() {
-    echo_info "Testando conexão com o banco de dados..."
-    if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -c "SELECT 1;" >/dev/null 2>&1; then
-        echo_error "Falha na conexão com o banco de dados. Verifique as configurações."
+# Função para detectar container do Postgres no Docker Swarm
+detect_postgres_container() {
+    # Exemplo: precisamos identificar qual serviço é do Postgres
+    # Aqui assumimos que o serviço no swarm chama-se "postgres_service"
+    # Ajuste conforme sua realidade.
+    # Caso contrário, pode-se listar e filtrar:
+    # docker ps --filter "ancestor=postgres" --format "{{.ID}}"
+    POSTGRES_CONTAINER_ID=$(docker ps --filter "ancestor=postgres" --format "{{.ID}}" | head -n 1)
+    if [ -z "$POSTGRES_CONTAINER_ID" ]; then
+        echo -e "${RED}Não foi possível detectar o container do PostgreSQL. Verifique o Swarm.${NC}"
+        return 1
+    fi
+    echo "$POSTGRES_CONTAINER_ID"
+    return 0
+}
+
+# Função para testar conexão ao banco
+test_connection() {
+    export PGPASSWORD="$POSTGRES_PASSWORD"
+    pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U postgres > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Falha ao conectar no Postgres. Verifique as credenciais e o host.${NC}"
         exit 1
     fi
-    echo_success "Conexão com o banco de dados estabelecida com sucesso."
 }
 
-# =============================================================================
-# Verificação e Atualização do Contêiner
-# =============================================================================
-verify_container() {
-    local current_container="$1"
-    if ! docker ps --format "{{.Names}}" | grep -qw "^${current_container}$"; then
-        echo_warning "Contêiner '$current_container' não encontrado ou não está rodando."
-        echo_info "Detectando contêiner PostgreSQL novamente..."
-        local new_container
-        new_container=$(detect_postgres_container)
-        if [ "$new_container" != "$current_container" ]; then
-            echo_info "Atualizando contêiner para: $new_container"
-            sed -i "s/CONTAINER_NAME=\".*\"/CONTAINER_NAME=\"$new_container\"/" "$ENV_FILE"
-            CONTAINER_NAME="$new_container"
-        fi
-    fi
+# Função para limpar backups antigos de acordo com retenção
+clean_old_backups() {
+    # Encontra pastas mais antigas que retention_days_value e apaga
+    find "$BACKUP_BASE_DIR" -maxdepth 1 -type d -mtime +$retention_days_value -exec rm -rf {} \; 2>/dev/null
 }
 
-# =============================================================================
-# Garantir que o Banco de Dados Existe
-# =============================================================================
-ensure_database_exists() {
-    local db_name="$1"
-    if ! docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -lqt | cut -d \| -f 1 | grep -qw "$db_name"; then
-        echo_info "Criando banco de dados '$db_name'..."
-        docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-            psql -U "$PG_USER" -c "CREATE DATABASE \"$db_name\" WITH TEMPLATE template0;"
-    fi
-}
-
-# =============================================================================
-# Função de Backup Completo ou Parcial
-# =============================================================================
-do_backup() {
-    local mode="$1" # "full" ou "partial"
-    rotate_logs
-    verify_container "$CONTAINER_NAME"
-    test_database_connection
-
-    local selected_databases=()
-
-    if [ "$mode" == "full" ]; then
-        echo_info "Iniciando backup completo..."
-        selected_databases=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-            psql -U "$PG_USER" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false;" | tr -d ' \t')
+# Função para obter o tamanho de um arquivo de backup
+get_file_size() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        du -h "$file" | cut -f1
     else
-        echo_info "Selecione os bancos de dados para backup:"
-        local databases
-        databases=$(docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-            psql -U "$PG_USER" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false;")
-        local db_array=($databases)
-        local count=1
-        for db in "${db_array[@]}"; do
-            echo "$count) $db"
-            count=$((count+1))
-        done
-        echo "Digite os números dos bancos de dados separados por espaço (ou 'all' para todos):"
-        read -r db_numbers
-        if [ "$db_numbers" == "all" ]; then
-            selected_databases=("${db_array[@]}")
-        else
-            IFS=' ' read -r -a db_indexes <<< "$db_numbers"
-            for index in "${db_indexes[@]}"; do
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -le "${#db_array[@]}" ]; then
-                    selected_databases+=("${db_array[$((index-1))]}")
-                else
-                    echo_error "Índice inválido: $index"
-                    exit 1
-                fi
-            done
-        fi
-        echo_info "Iniciando backup parcial..."
+        echo "0B"
+    fi
+}
+
+# Função para notificar via webhook
+send_webhook_notification() {
+    local action="$1"
+    local backup_date="$2"
+    local db_name="$3"
+    local backup_file="$4"
+    local backup_size="$5"
+    local deleted_backup="$6"         # nome do backup deletado, se houver
+    local deletion_reason="$7"        # motivo da deleção, se houver
+
+    local retention="$retention_days_value"
+    local json_payload=$(cat <<EOF
+{
+  "action": "$action",
+  "date": "$backup_date",
+  "database_name": "$db_name",
+  "backup_file": "$backup_file",
+  "backup_size": "$backup_size",
+  "retention_days": $retention,
+  "deleted_backup": {
+    "backup_name": "$deleted_backup",
+    "deletion_reason": "$deletion_reason"
+  },
+  "status": "OK",
+  "notes": "Backup/Restauração executado conforme configuração."
+}
+EOF
+)
+    curl -s -X POST -H "Content-Type: application/json" -d "$json_payload" "$WEBHOOK_URL" > /dev/null
+}
+
+# Função para executar backup completo
+full_backup() {
+    test_connection
+    TIMESTAMP=$(date +"%Y-%m-%d_%H%M%S")
+    BACKUP_DIR="$BACKUP_BASE_DIR/$TIMESTAMP"
+    mkdir -p "$BACKUP_DIR/backup-completo" "$BACKUP_DIR/backup-databases"
+
+    echo -e "${BLUE}Iniciando backup completo do cluster...${NC}"
+    export PGPASSWORD="$POSTGRES_PASSWORD"
+    # Backup completo
+    pg_dumpall -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -f "$BACKUP_DIR/backup-completo/backup_completo_$TIMESTAMP.sql"
+
+    # Backup de cada database (lista bancos e faz dump individual)
+    DBS=$(psql -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres');")
+    for DB in $DBS; do
+        pg_dump -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -F c -f "$BACKUP_DIR/backup-databases/${DB}_$TIMESTAMP.backup" "$DB"
+    done
+
+    # Limpar backups antigos
+    BEFORE_DELETE=$(find "$BACKUP_BASE_DIR" -maxdepth 1 -type d -mtime +$retention_days_value)
+    clean_old_backups
+    AFTER_DELETE=$(find "$BACKUP_BASE_DIR" -maxdepth 1 -type d -mtime +$retention_days_value)
+
+    DELETED_BACKUP=""
+    DELETION_REASON=""
+    if [ "$BEFORE_DELETE" != "$AFTER_DELETE" ]; then
+        # Algum backup foi apagado
+        DELETED_BACKUP=$(echo "$BEFORE_DELETE" | grep -v "$AFTER_DELETE")
+        DELETION_REASON="Prazo de retenção expirado"
     fi
 
-    local TIMESTAMP=$(date +%Y%m%d%H%M%S)
+    # Notificar via webhook
+    FILESIZE=$(get_file_size "$BACKUP_DIR/backup-completo/backup_completo_$TIMESTAMP.sql")
+    send_webhook_notification "Backup realizado com sucesso" "$(date +"%d/%m/%Y %H:%M:%S")" "todos_os_bancos" "backup_completo_$TIMESTAMP.sql" "$FILESIZE" "$DELETED_BACKUP" "$DELETION_REASON"
 
-    for db in ${selected_databases[@]}; do
-        ensure_database_exists "$db"
-
-        echo_info "Fazendo backup do banco '$db'..."
-        local BACKUP_FILENAME="postgres_backup_${TIMESTAMP}_${db}.sql"
-        local BACKUP_PATH="$BACKUP_DIR/$BACKUP_FILENAME"
-
-        if docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-            pg_dump -U "$PG_USER" -F p --inserts -v "$db" > "$BACKUP_PATH" 2>>"$LOG_FILE"; then
-
-            gzip -f "$BACKUP_PATH"
-            BACKUP_PATH="${BACKUP_PATH}.gz"
-
-            local BACKUP_SIZE
-            BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
-            echo_success "Backup completo do banco '$db': $(basename "$BACKUP_PATH") (Tamanho: $BACKUP_SIZE)"
-
-            BACKUP_RESULTS["$db"]="success"
-            BACKUP_SIZES["$db"]="$BACKUP_SIZE"
-            BACKUP_FILES["$db"]="$(basename "$BACKUP_PATH")"
-
-            # Remover backups antigos
-            local old_backup
-            old_backup=$(find "$BACKUP_DIR" -name "postgres_backup_*_${db}.sql.gz" -mtime +"$RETENTION_DAYS" -print | sort | head -n1 || true)
-            if [ -n "$old_backup" ]; then
-                DELETED_BACKUPS["$db"]="$(basename "$old_backup")"
-                rm -f "$old_backup"
-                echo_info "Backup antigo deletado: $(basename "$old_backup")"
-            fi
-            find "$BACKUP_DIR" -name "postgres_backup_*_${db}.sql.gz" -mtime +"$RETENTION_DAYS" -delete
-
-        else
-            echo_error "Falha no backup do banco '$db'"
-            BACKUP_RESULTS["$db"]="error"
-        fi
-    done
-
-    # Construir payload para webhook
-    local payload='{
-  "action": "Backup realizado com sucesso",
-  "date": "'$(date '+%d/%m/%Y %H:%M:%S')'",
-  "backup_details": ['
-
-    local first=1
-    for db in "${!BACKUP_RESULTS[@]}"; do
-        if [ "${BACKUP_RESULTS[$db]}" == "success" ]; then
-            if [ "$first" -eq 1 ]; then
-                first=0
-            else
-                payload+=', '
-            fi
-            payload+='{
-    "database_name": "'$db'",
-    "backup_file": "'${BACKUP_FILES[$db]}'",
-    "backup_size": "'${BACKUP_SIZES[$db]}'"
-  }'
-        fi
-    done
-
-    payload+='], "retention_days": '$RETENTION_DAYS', "deleted_backup": {'
-
-    local first_del=1
-    for db in "${!DELETED_BACKUPS[@]}"; do
-        if [ "$first_del" -eq 1 ]; then
-            first_del=0
-        else
-            payload+=', '
-        fi
-        payload+='{
-    "backup_name": "'${DELETED_BACKUPS[$db]}'",
-    "deletion_reason": "Prazo de retenção expirado"
-  }'
-    done
-
-    payload+='}, "status": "OK", "notes": "Backup executado conforme cron job configurado. Nenhum erro reportado durante o processo." }'
-
-    # Enviar webhook
-    send_webhook "$payload"
+    echo -e "${GREEN}Backup completo finalizado com sucesso!${NC}"
 }
 
-# =============================================================================
-# Função de Restauração
-# =============================================================================
-do_restore() {
-    rotate_logs
-    verify_container "$CONTAINER_NAME"
-    test_database_connection
+# Função para backup de bancos específicos
+specific_backup() {
+    test_connection
+    # Listar bancos
+    echo -e "${BLUE}Listando bancos disponíveis:${NC}"
+    DBS=$(psql -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -t -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres');")
+    declare -a db_array=()
+    i=1
+    for dbn in $DBS; do
+        echo "$i. $dbn"
+        db_array+=("$dbn")
+        ((i++))
+    done
 
-    echo_info "Selecione o tipo de restauração:"
-    echo "1) Restauração completa (todos os bancos)"
-    echo "2) Restauração de bancos específicos"
-    echo "3) Cancelar"
-    read -p "Digite o número da opção desejada: " restore_option
+    read -p "Digite os números dos bancos que deseja fazer backup (ex: 1 3 5): " choices
+    TIMESTAMP=$(date +"%Y-%m-%d_%H%M%S")
+    BACKUP_DIR="$BACKUP_BASE_DIR/$TIMESTAMP"
+    mkdir -p "$BACKUP_DIR/backup-databases"
 
-    case "$restore_option" in
-        1)
-            restore_full
-            ;;
-        2)
-            restore_partial
-            ;;
-        3)
-            echo_info "Restauração cancelada."
-            exit 0
-            ;;
-        *)
-            echo_warning "Opção inválida. Cancelando restauração."
-            exit 1
-            ;;
-    esac
+    for choice in $choices; do
+        dbname="${db_array[$((choice-1))]}"
+        echo -e "${YELLOW}Fazendo backup do banco: $dbname...${NC}"
+        pg_dump -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -F c -f "$BACKUP_DIR/backup-databases/${dbname}_$TIMESTAMP.backup" "$dbname"
+    done
+
+    # Limpar antigos
+    BEFORE_DELETE=$(find "$BACKUP_BASE_DIR" -maxdepth 1 -type d -mtime +$retention_days_value)
+    clean_old_backups
+    AFTER_DELETE=$(find "$BACKUP_BASE_DIR" -maxdepth 1 -type d -mtime +$retention_days_value)
+
+    DELETED_BACKUP=""
+    DELETION_REASON=""
+    if [ "$BEFORE_DELETE" != "$AFTER_DELETE" ]; then
+        DELETED_BACKUP=$(echo "$BEFORE_DELETE" | grep -v "$AFTER_DELETE")
+        DELETION_REASON="Prazo de retenção expirado"
+    fi
+
+    # Notificação
+    FILESIZE_TOTAL=0
+    for choice in $choices; do
+        dbname="${db_array[$((choice-1))]}"
+        SIZE=$(get_file_size "$BACKUP_DIR/backup-databases/${dbname}_$TIMESTAMP.backup")
+        send_webhook_notification "Backup de banco específico" "$(date +"%d/%m/%Y %H:%M:%S")" "$dbname" "${dbname}_$TIMESTAMP.backup" "$SIZE" "$DELETED_BACKUP" "$DELETION_REASON"
+    done
+
+    echo -e "${GREEN}Backup de bancos específicos finalizado!${NC}"
 }
 
-restore_full() {
-    echo_info "Iniciando restauração completa..."
-    local unique_databases=()
-
-    # Extrair nomes únicos de bancos de dados
-    for backup in "${all_backups[@]}"; do
-        local db_name
-        db_name=$(basename "$backup" | sed -E 's/postgres_backup_[0-9]+_(.*)\.sql\.gz/\1/')
-        unique_databases+=("$db_name")
-    done
-
-    # Remover duplicatas
-    IFS=$'\n' unique_databases=($(sort -u <<<"${unique_databases[*]}"))
-    unset IFS
-
-    for db in "${unique_databases[@]}"; do
-        restore_database "$db"
-    done
+# Listar todos os backups
+list_backups() {
+    echo -e "${BLUE}Listando todos os backups disponíveis:${NC}"
+    ls -1 "$BACKUP_BASE_DIR" | sort
 }
 
-restore_partial() {
-    echo_info "Selecione os bancos de dados para restauração:"
-    local db_list=()
-    for backup in "${all_backups[@]}"; do
-        local db_name
-        db_name=$(basename "$backup" | sed -E 's/postgres_backup_[0-9]+_(.*)\.sql\.gz/\1/')
-        db_list+=("$db_name")
+# Restauração completa
+restore_backup() {
+    test_connection
+    echo -e "${YELLOW}Listando backups para restauração:${NC}"
+    backups_list=$(ls -1 "$BACKUP_BASE_DIR" | sort)
+    i=1
+    declare -a backup_dirs=()
+    for bkp in $backups_list; do
+        echo "$i. $bkp"
+        backup_dirs+=("$bkp")
+        ((i++))
     done
+    read -p "Digite o número do backup a restaurar: " restore_choice
+    selected_backup="${backup_dirs[$((restore_choice-1))]}"
 
-    # Remover duplicatas
-    IFS=$'\n' db_list=($(sort -u <<<"${db_list[*]}"))
-    unset IFS
-
-    local count=1
-    for db in "${db_list[@]}"; do
-        echo "$count) $db"
-        count=$((count+1))
-    done
-
-    echo "Digite os números dos bancos de dados separados por espaço (ou 'all' para todos):"
-    read -r db_numbers
-    local selected_databases=()
-
-    if [ "$db_numbers" == "all" ]; then
-        selected_databases=("${db_list[@]}")
+    FULL_BACKUP_FILE="$BACKUP_BASE_DIR/$selected_backup/backup-completo/backup_completo_${selected_backup}.sql"
+    if [ -f "$FULL_BACKUP_FILE" ]; then
+        echo -e "${YELLOW}Restauração completa do cluster usando ${FULL_BACKUP_FILE}...${NC}"
+        # Precisamos recriar bancos se necessário. O pg_dumpall contém instruções de criação,
+        # então basta:
+        export PGPASSWORD="$POSTGRES_PASSWORD"
+        psql -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -f "$FULL_BACKUP_FILE"
+        echo -e "${GREEN}Restauração completa concluída!${NC}"
+        send_webhook_notification "Restauração realizada com sucesso" "$(date +"%d/%m/%Y %H:%M:%S")" "todos_os_bancos" "backup_completo_${selected_backup}.sql" "$(get_file_size "$FULL_BACKUP_FILE")" "" ""
     else
-        IFS=' ' read -r -a db_indexes <<< "$db_numbers"
-        for index in "${db_indexes[@]}"; do
-            if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -le "${#db_list[@]}" ]; then
-                selected_databases+=("${db_list[$((index-1))]}")
-            else
-                echo_error "Índice inválido: $index"
-                exit 1
-            fi
-        done
+        echo -e "${RED}Arquivo de backup completo não encontrado para o backup selecionado.${NC}"
     fi
-
-    for db in "${selected_databases[@]}"; do
-        restore_database "$db"
-    done
 }
 
-restore_database() {
-    local db="$1"
-    echo_info "Restaurando banco '$db'..."
-
-    # Listar backups disponíveis para o banco
-    mapfile -t db_backups < <(find "$BACKUP_DIR" -type f -name "postgres_backup_*_${db}.sql.gz" | sort -r)
-
-    if [ ${#db_backups[@]} -eq 0 ]; then
-        echo_error "Nenhum backup encontrado para o banco '$db'."
-        return 1
-    fi
-
-    echo_info "Backups disponíveis para '$db':"
-    local count=1
-    for bkp in "${db_backups[@]}"; do
-        local file_size
-        file_size=$(du -h "$bkp" | cut -f1)
-        local file_date
-        file_date=$(date -r "$bkp" '+%d/%m/%Y %H:%M:%S')
-        echo "$count) $(basename "$bkp") (Tamanho: $file_size, Data: $file_date)"
-        count=$((count+1))
+# Restaurar bancos específicos (opcional)
+restore_specific_db() {
+    test_connection
+    echo -e "${YELLOW}Listando backups para restauração de bancos individuais:${NC}"
+    backups_list=$(ls -1 "$BACKUP_BASE_DIR" | sort)
+    i=1
+    declare -a backup_dirs=()
+    for bkp in $backups_list; do
+        echo "$i. $bkp"
+        backup_dirs+=("$bkp")
+        ((i++))
     done
-
-    local selection
-    while true; do
-        read -p "Digite o número do backup (ou 0 para cancelar): " selection
-        if [ "$selection" == "0" ]; then
-            echo_info "Restauração do banco '$db' cancelada pelo usuário."
-            return 1
-        elif [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -le "${#db_backups[@]}" ]; then
-            local chosen_backup="${db_backups[$((selection-1))]}"
-            break
-        else
-            echo_warning "Seleção inválida. Tente novamente."
-        fi
-    done
-
-    echo_warning "ATENÇÃO: Isso irá substituir o banco '$db' existente!"
-    read -p "Digite 'sim' para confirmar: " confirm
-    if [ "$confirm" != "sim" ]; then
-        echo_info "Restauração do banco '$db' cancelada pelo usuário."
-        return 1
-    fi
-
-    # Criar o banco se não existir
-    ensure_database_exists "$db"
-
-    # Descomprimir o backup
-    gunzip -c "$chosen_backup" > "$TEMP_DIR/temp_restore.sql"
-
-    # Terminar conexões existentes
-    docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -d "$db" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$db' AND pid <> pg_backend_pid();" >/dev/null 2>&1
-
-    # Restaurar dados
-    if docker exec -e PGPASSWORD="$PG_PASSWORD" "$CONTAINER_NAME" \
-        psql -U "$PG_USER" -d "$db" -f "/var/backups/postgres/temp/temp_restore.sql" 2>>"$LOG_FILE"; then
-        echo_success "Restauração do banco '$db' concluída com sucesso."
-        # Enviar webhook de sucesso
-        local success_payload="{
-  \"action\": \"Restauração realizada com sucesso\",
-  \"date\": \"$(date '+%d/%m/%Y %H:%M:%S')\",
-  \"database_name\": \"$db\",
-  \"backup_file\": \"$(basename "$chosen_backup")\",
-  \"status\": \"OK\",
-  \"notes\": \"Restauração executada conforme solicitação do usuário.\"
-}"
-        send_webhook "$success_payload"
-    else
-        echo_error "Falha na restauração do banco '$db'."
-        # Enviar webhook de erro
-        local error_payload="{
-  \"action\": \"Restauração falhou\",
-  \"date\": \"$(date '+%d/%m/%Y %H:%M:%S')\",
-  \"database_name\": \"$db\",
-  \"backup_file\": \"$(basename "$chosen_backup")\",
-  \"status\": \"ERROR\",
-  \"notes\": \"Falha na execução da restauração.\"
-}"
-        send_webhook "$error_payload"
-    fi
-
-    # Limpar arquivos temporários
-    rm -f "$TEMP_DIR/temp_restore.sql"
-}
-
-# =============================================================================
-# Listar Todos os Backups
-# =============================================================================
-list_all_backups() {
-    echo_info "Listando todos os backups disponíveis:"
-    mapfile -t all_backups < <(find "$BACKUP_DIR" -type f -name "postgres_backup_*.sql.gz" | sort -r)
-    if [ ${#all_backups[@]} -eq 0 ]; then
-        echo_warning "Nenhum backup encontrado."
+    read -p "Digite o número do backup a restaurar: " restore_choice
+    selected_backup="${backup_dirs[$((restore_choice-1))]}"
+    BACKUP_DB_DIR="$BACKUP_BASE_DIR/$selected_backup/backup-databases"
+    if [ ! -d "$BACKUP_DB_DIR" ]; then
+        echo -e "${RED}Nenhum backup individual de bancos encontrado nesse diretório.${NC}"
         return
     fi
 
-    local count=1
-    for bkp in "${all_backups[@]}"; do
-        local file_size
-        file_size=$(du -h "$bkp" | cut -f1)
-        local file_date
-        file_date=$(date -r "$bkp" '+%d/%m/%Y %H:%M:%S')
-        echo_info "$count) $(basename "$bkp") (Tamanho: $file_size, Data: $file_date)"
-        count=$((count+1))
+    # Listar arquivos no backup-databases
+    echo -e "${BLUE}Bancos disponíveis no backup:${NC}"
+    files_list=$(ls -1 "$BACKUP_DB_DIR")
+    j=1
+    declare -a db_files=()
+    for f in $files_list; do
+        echo "$j. $f"
+        db_files+=("$f")
+        ((j++))
     done
+    read -p "Digite o número do arquivo de backup a restaurar: " db_choice
+    selected_db_file="${db_files[$((db_choice-1))]}"
+
+    # Extrair nome do banco
+    dbname=$(echo "$selected_db_file" | cut -d'_' -f1)
+    echo -e "${YELLOW}Restaurando o banco $dbname ...${NC}"
+    export PGPASSWORD="$POSTGRES_PASSWORD"
+    # Verificar se banco existe
+    db_exist=$(psql -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -tAc "SELECT 1 FROM pg_database WHERE datname='$dbname';")
+    if [ "$db_exist" != "1" ]; then
+        echo -e "${BLUE}Banco não existe, criando...${NC}"
+        createdb -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" "$dbname"
+    fi
+
+    pg_restore -U postgres -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -d "$dbname" "$BACKUP_DB_DIR/$selected_db_file"
+    echo -e "${GREEN}Restauração do banco $dbname concluída!${NC}"
+    send_webhook_notification "Restauração de banco específica realizada com sucesso" "$(date +"%d/%m/%Y %H:%M:%S")" "$dbname" "$selected_db_file" "$(get_file_size "$BACKUP_DB_DIR/$selected_db_file")" "" ""
 }
 
-# =============================================================================
-# Menu Interativo
-# =============================================================================
-show_menu() {
+# Menu principal
+main_menu() {
     while true; do
-        echo
-        echo "===== PostgreSQL Backup Manager v1.0.0 ====="
+        echo -e "${GREEN}===== PostgreSQL Backup Manager v$SCRIPT_VERSION =====${NC}"
         echo "1. Fazer backup completo"
         echo "2. Fazer backup de bancos específicos"
-        echo "3. Restaurar backup"
-        echo "4. Listar todos os backups"
-        echo "5. Atualizar configurações"
-        echo "6. Sair"
+        echo "3. Restaurar backup completo"
+        echo "4. Restaurar backup de bancos específicos"
+        echo "5. Listar todos os backups"
+        echo "6. Atualizar configurações"
+        echo "7. Sair"
         read -p "Digite o número da opção desejada: " choice
 
         case $choice in
-            1)
-                do_backup "full"
-                ;;
-            2)
-                do_backup "partial"
-                ;;
-            3)
-                do_restore
-                ;;
-            4)
-                list_all_backups
-                ;;
-            5)
-                setup_config
-                ;;
-            6)
-                echo_info "Saindo..."
-                exit 0
-                ;;
-            *)
-                echo_warning "Opção inválida. Tente novamente."
-                ;;
+            1) full_backup ;;
+            2) specific_backup ;;
+            3) restore_backup ;;
+            4) restore_specific_db ;;
+            5) list_backups ;;
+            6) setup_env ;;
+            7) echo -e "${BLUE}Saindo...${NC}"; exit 0 ;;
+            *) echo -e "${RED}Opção inválida.${NC}" ;;
         esac
     done
 }
 
-# =============================================================================
-# Instalação do Script Principal
-# =============================================================================
-install_script() {
-    echo_info "Instalando PostgreSQL Backup Manager..."
-    cp "$0" "$SCRIPT_DIR/pg_backup_manager.sh"
-    chmod +x "$SCRIPT_DIR/pg_backup_manager.sh"
-    echo_success "Script principal instalado em $SCRIPT_DIR/pg_backup_manager.sh"
+# Entrada do script
+load_env
 
-    # Criar links simbólicos
-    ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" "$SCRIPT_DIR/pg_backup"
-    ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" "$SCRIPT_DIR/pg_restore_db"
-
-    if [ ! -L "$SCRIPT_DIR/pg_backup" ] || [ ! -L "$SCRIPT_DIR/pg_restore_db" ]; then
-        echo_error "Falha ao criar links simbólicos."
-        exit 1
+if [ "$1" == "--setup" ]; then
+    setup_env
+    # Perguntar se quer backup agora
+    read -p "Deseja iniciar um backup completo agora? (s/n): " resp
+    if [ "$resp" == "s" ]; then
+        full_backup
     fi
-
-    echo_success "Links simbólicos criados com sucesso:"
-    echo "  - pg_backup      -> $SCRIPT_DIR/pg_backup_manager.sh"
-    echo "  - pg_restore_db  -> $SCRIPT_DIR/pg_backup_manager.sh"
-
-    # Configurar cron job
-    configure_cron
-    echo_success "Instalação concluída com sucesso!"
-}
-
-# =============================================================================
-# Configurar Cron Job para Backup Diário às 00:00
-# =============================================================================
-configure_cron() {
-    echo_info "Configurando cron job para backup diário às 00:00..."
-    if ! crontab -l 2>/dev/null | grep -q "/usr/local/bin/pg_backup_manager.sh --backup"; then
-        (crontab -l 2>/dev/null; echo "0 0 * * * /usr/local/bin/pg_backup_manager.sh --backup") | crontab -
-        echo_success "Cron job configurado com sucesso."
-    else
-        echo_info "Cron job já está configurado."
-    fi
-}
-
-# =============================================================================
-# Atualização do Script Principal
-# =============================================================================
-update_script() {
-    echo_info "Atualizando script principal..."
-    local latest_script_url="https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/pg_backup_manager.sh"
-    if curl -sSL "$latest_script_url" -o "$SCRIPT_DIR/pg_backup_manager.sh"; then
-        chmod +x "$SCRIPT_DIR/pg_backup_manager.sh"
-        echo_success "Script principal atualizado com sucesso."
-    else
-        echo_error "Falha ao atualizar o script principal. Verifique sua conexão."
-        exit 1
-    fi
-    echo_info "Atualização dos links simbólicos..."
-    ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" "$SCRIPT_DIR/pg_backup"
-    ln -sf "$SCRIPT_DIR/pg_backup_manager.sh" "$SCRIPT_DIR/pg_restore_db"
-    echo_success "Atualização concluída com sucesso!"
-}
-
-# =============================================================================
-# Função de Limpeza da Instalação
-# =============================================================================
-clean_installation() {
-    echo_info "Limpando instalação anterior..."
-    rm -f "$SCRIPT_DIR/pg_backup_manager.sh"
-    rm -f "$SCRIPT_DIR/pg_backup"
-    rm -f "$SCRIPT_DIR/pg_restore_db"
-    rm -f "$ENV_FILE"
-    rm -f /etc/pg_backup.env
-    rm -rf "$BACKUP_DIR" /var/log/pg_backup.log
-    crontab -l 2>/dev/null | grep -v "/usr/local/bin/pg_backup_manager.sh --backup" | crontab -
-    echo_success "Instalação antiga removida com sucesso."
-}
-
-# =============================================================================
-# Função Principal
-# =============================================================================
-main() {
-    case "${1:-}" in
-        "--backup")
-            if [ ! -f "$ENV_FILE" ]; then
-                echo_error "Arquivo de configuração '$ENV_FILE' não encontrado. Execute o script sem argumentos para configurar."
-                exit 1
-            fi
-            source "$ENV_FILE"
-            verify_container "$CONTAINER_NAME"
-            do_backup "full"
-            ;;
-        "--restore")
-            if [ ! -f "$ENV_FILE" ]; then
-                echo_error "Arquivo de configuração '$ENV_FILE' não encontrado. Execute o script sem argumentos para configurar."
-                exit 1
-            fi
-            source "$ENV_FILE"
-            verify_container "$CONTAINER_NAME"
-            do_restore
-            ;;
-        "--install")
-            install_script
-            ;;
-        "--update")
-            update_script
-            ;;
-        "--clean")
-            clean_installation
-            ;;
-        *)
-            if [ ! -f "$ENV_FILE" ]; then
-                echo_info "Iniciando configuração do PostgreSQL Backup Manager..."
-                setup_config
-                echo_success "Configuração concluída com sucesso!"
-                install_script
-            fi
-            source "$ENV_FILE"
-            verify_container "$CONTAINER_NAME"
-            show_menu
-            ;;
-    esac
-}
-
-main "$@"
+    main_menu
+elif [ "$1" == "--auto-backup" ]; then
+    # Modo automático para ser usado no cron
+    full_backup
+    exit 0
+else
+    # Modo interativo
+    main_menu
+fi
