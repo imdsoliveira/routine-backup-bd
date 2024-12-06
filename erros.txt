@@ -1,0 +1,99 @@
+root@vpsDoed:~# bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
+
+===== PostgreSQL Backup Manager v1.0.0 =====
+1. Fazer backup completo
+2. Fazer backup de bancos específicos
+3. Restaurar backup
+4. Listar todos os backups
+5. Atualizar configurações
+6. Sair
+Digite o número da opção desejada: 4
+
+===== PostgreSQL Backup Manager v1.0.0 =====
+1. Fazer backup completo
+2. Fazer backup de bancos específicos
+3. Restaurar backup
+4. Listar todos os backups
+5. Atualizar configurações
+6. Sair
+Digite o número da opção desejada: 3
+1) Restauração completa (todas as bases)
+2) Restauração de bancos específicos
+3) Cancelar
+Digite o número da opção desejada: 2
+1) chatwoot
+2) evolution
+3) flowise
+4) glitchtip
+5) langfuse
+6) listmonk
+7) n8n_queue
+8) n8n_queue_beta
+9) postgres
+10) supabase
+11) typebot
+Digite os números dos bancos de dados separados por espaço (ou 'all' para todos):
+2
+1) postgres_backup_20241205225437_evolution.sql.gz (Tamanho: 4.0K, Data: 05/12/2024 22:55:22)
+2) postgres_backup_20241205214733_evolution.sql.gz (Tamanho: 4.0K, Data: 05/12/2024 21:48:19)
+3) postgres_backup_20241205212841_evolution.sql.gz (Tamanho: 4.0K, Data: 05/12/2024 21:29:18)
+Digite o número do backup (ou 0 para cancelar): 3
+Digite 'sim' para confirmar: sim
+
+===== PostgreSQL Backup Manager v1.0.0 =====
+1. Fazer backup completo
+2. Fazer backup de bancos específicos
+3. Restaurar backup
+4. Listar todos os backups
+5. Atualizar configurações
+6. Sair
+Digite o número da opção desejada: 3
+1) Restauração completa (todas as bases)
+2) Restauração de bancos específicos
+3) Cancelar
+Digite o número da opção desejada: 2
+1) chatwoot
+2) evolution
+3) flowise
+4) glitchtip
+5) langfuse
+6) listmonk
+7) n8n_queue
+8) n8n_queue_beta
+9) postgres
+10) supabase
+11) typebot
+Digite os números dos bancos de dados separados por espaço (ou 'all' para todos):
+1
+1) postgres_backup_20241205225437_chatwoot.sql.gz (Tamanho: 24K, Data: 05/12/2024 22:55:21)
+2) postgres_backup_20241205214733_chatwoot.sql.gz (Tamanho: 24K, Data: 05/12/2024 21:48:17)
+3) postgres_backup_20241205212841_chatwoot.sql.gz (Tamanho: 24K, Data: 05/12/2024 21:29:20)
+Digite o número do backup (ou 0 para cancelar): 3
+Digite 'sim' para confirmar: sim
+CREATE DATABASE
+ERROR:  syntax error at end of input
+LINE 1: CREATE TABLE public.access_tokens (
+                                           ^
+root@vpsDoed:~# bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
+
+===== PostgreSQL Backup Manager v1.0.0 =====
+1. Fazer backup completo
+2. Fazer backup de bancos específicos
+3. Restaurar backup
+4. Listar todos os backups
+5. Atualizar configurações
+6. Sair
+Digite o número da opção desejada: 3
+1) Restauração completa (todas as bases)
+2) Restauração de bancos específicos
+3) Cancelar
+Digite o número da opção desejada: 1
+1) postgres_backup_20241205225437_chatwoot.sql.gz (Tamanho: 24K, Data: 05/12/2024 22:55:21)
+2) postgres_backup_20241205214733_chatwoot.sql.gz (Tamanho: 24K, Data: 05/12/2024 21:48:17)
+3) postgres_backup_20241205212841_chatwoot.sql.gz (Tamanho: 24K, Data: 05/12/2024 21:29:20)
+Digite o número do backup (ou 0 para cancelar): 1
+Digite 'sim' para confirmar: sim
+ERROR:  syntax error at end of input
+LINE 1: CREATE TABLE public.access_tokens (
+                                           ^
+root@vpsDoed:~# 
