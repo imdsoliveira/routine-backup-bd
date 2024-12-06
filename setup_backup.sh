@@ -1,3 +1,4 @@
+# Necessario "instalar apt-get install postgresql-client-14"
 #!/usr/bin/env bash
 # =============================================================================
 # PostgreSQL Backup Manager 2024
