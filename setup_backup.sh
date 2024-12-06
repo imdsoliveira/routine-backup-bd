@@ -2,7 +2,7 @@
 
 # =============================================================================
 # PostgreSQL Backup Manager Simplificado 2024
-# Versão: 2.0.1
+# Versão: 2.0.2
 # =============================================================================
 # Funcionalidades:
 # - Detecção automática de contêiner PostgreSQL
@@ -580,7 +580,7 @@ list_all_backups() {
 show_menu() {
     while true; do
         echo
-        echo "===== PostgreSQL Backup Manager v1.0.1 ====="
+        echo "===== PostgreSQL Backup Manager v2.0.2 ====="
         echo "1. Fazer backup completo"
         echo "2. Fazer backup de bancos específicos"
         echo "3. Restaurar backup"
