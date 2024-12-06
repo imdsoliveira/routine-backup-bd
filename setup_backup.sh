@@ -1,3 +1,4 @@
+# bash <(curl -sSL https://raw.githubusercontent.com/imdsoliveira/routine-backup-bd/main/setup_backup.sh)
 # Necessario "instalar apt-get install postgresql-client-14"
 #!/usr/bin/env bash
 # =============================================================================
