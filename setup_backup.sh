@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # PostgreSQL Backup Manager 2024
-# Versão: 0.3.0 (atualizada)
+# Versão: 0.3.1 (atualizada)
 # =============================================================================
 # - Backup automático diário
 # - Retenção configurável
@@ -10,6 +10,7 @@
 # - Criação de bancos ausentes na restauração
 # - Logs e feedback no terminal com cores
 # - Verificação e configuração automática de cron
+# - Evita duplicações de cron jobs
 # =============================================================================
 
 RED='\033[0;31m'
@@ -18,9 +19,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-SCRIPT_VERSION="0.3.0"
+SCRIPT_VERSION="0.3.1"
 BACKUP_BASE_DIR="/root/backups-postgres"
-SCRIPT_PATH="$(readlink -f "$0")" # Caminho completo do script
+SCRIPT_PATH="/opt/postgres_backup_manager/setup_backup.sh" # Caminho fixo do script
+CRON_IDENTIFIER="# PostgreSQL Backup Manager Cron Job"
 CRON_JOB="0 0 * * * $SCRIPT_PATH --auto-backup >> /var/log/postgres_backup.log 2>&1"
 
 load_env() {
@@ -93,41 +95,22 @@ check_version_compatibility() {
 }
 
 check_and_setup_cron() {
-    # Verifica se a linha do cron existe
-    current_cron=$(crontab -l 2>/dev/null)
-    echo "$current_cron" | grep --silent "$SCRIPT_PATH --auto-backup"
-    if [ $? -ne 0 ]; then
-        # Cron job não encontrado
-        echo -e "${YELLOW}Cron job para backup automático não encontrado.${NC}"
-        read -p "Deseja configurar o backup automático diário (s/n)? " cron_choice
-        if [ "$cron_choice" == "s" ]; then
-            new_cron="$current_cron
-$CRON_JOB"
-            # Remove linhas em branco extras
-            new_cron=$(echo "$new_cron" | sed '/^\s*$/d')
-            echo "$new_cron" | crontab -
-            echo -e "${GREEN}Cron job configurado com sucesso!${NC}"
-        else
-            echo -e "${YELLOW}Backup automático não configurado.${NC}"
-        fi
-    else
-        # Já existe uma entrada com --auto-backup
-        # Verifica se está correta (mesmo horário e caminho)
-        echo "$current_cron" | grep --silent "^0 0 \* \* \* $SCRIPT_PATH --auto-backup"
-        if [ $? -ne 0 ]; then
-            # Linha existe, mas não está exata. Vamos corrigir.
-            echo -e "${YELLOW}Entrada do cron encontrada, mas difere do esperado. Corrigindo...${NC}"
-            # Remove entradas antigas com --auto-backup
-            updated_cron=$(echo "$current_cron" | grep -v "$SCRIPT_PATH --auto-backup")
-            updated_cron="$updated_cron
-$CRON_JOB"
-            updated_cron=$(echo "$updated_cron" | sed '/^\s*$/d')
-            echo "$updated_cron" | crontab -
-            echo -e "${GREEN}Cron job atualizado com sucesso!${NC}"
-        else
-            echo -e "${GREEN}Cron job já está corretamente configurado.${NC}"
-        fi
-    fi
+    # Remove quaisquer entradas anteriores relacionadas ao Backup Manager
+    current_cron=$(crontab -l 2>/dev/null | grep -v "$CRON_IDENTIFIER")
+
+    # Adiciona a nova entrada do cron com identificador
+    new_cron="$current_cron
+# PostgreSQL Backup Manager Cron Job
+$CRON_JOB
+"
+
+    # Remove linhas em branco extras
+    new_cron=$(echo "$new_cron" | sed '/^\s*$/d')
+
+    # Atualiza o crontab
+    echo "$new_cron" | crontab -
+
+    echo -e "${GREEN}Cron job configurado/atualizado com sucesso!${NC}"
 }
 
 clean_old_backups() {
